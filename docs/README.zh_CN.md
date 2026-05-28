@@ -2,9 +2,11 @@
 
 版权 (C) 问星
 
-版本 0.0.2
+版本 0.1.1
 
 KiCad Backport 用于创建可由旧版 KiCad 打开的工程或文件副本。原始工程不会被覆盖。
+
+0.1.1 版本支持当前 KiCad 10.99 每夜版保存的工程，并可输出兼容 KiCad 10、KiCad 9、KiCad 8 或 KiCad 7 的副本。
 
 ## 语言
 
@@ -24,6 +26,16 @@ KiCad Backport 用于创建可由旧版 KiCad 打开的工程或文件副本。�
 
 ## 支持目标版本
 
+支持输入版本：
+
+- KiCad 10.99 每夜版
+- KiCad 10
+- KiCad 9
+- KiCad 8
+- KiCad 7
+
+支持输出目标：
+
 - KiCad 10
 - KiCad 9
 - KiCad 8
@@ -32,10 +44,14 @@ KiCad Backport 用于创建可由旧版 KiCad 打开的工程或文件副本。�
 ## 安装
 
 1. 关闭 KiCad。
-2. 将整个 `kicad_backport` 文件夹复制到 KiCad 的 `plugins` 文件夹。
-3. 对旧版 KiCad，也将同一文件夹复制到 `scripting/plugins`。
-4. 重新启动 KiCad。
-5. 运行 `创建 KiCad 兼容副本`。
+2. 将整个 `kicad_backport` 文件夹复制到 KiCad 用户 `plugins` 文件夹。
+3. 对 KiCad 10.99 及更新的 API 插件，请使用带版本号的用户插件目录，例如 `C:\Users\<你>\Documents\KiCad\10.99\plugins`。
+4. 在 KiCad 10.99 中，必须在偏好设置中启用 KiCad API/API server，否则 KiCad 不会识别或加载 API 插件。
+5. 对旧版 KiCad，也将同一文件夹复制到 `scripting/plugins`。
+6. 重新启动 KiCad。
+7. 运行 `创建 KiCad 兼容副本`。
+
+在 KiCad 10.99 中，API 插件不会从已安装程序的内置脚本目录加载，例如 `share/kicad/scripting/plugins`；请使用用户 `plugins` 文件夹，并确认已启用 KiCad API/API server。
 
 ## 使用
 

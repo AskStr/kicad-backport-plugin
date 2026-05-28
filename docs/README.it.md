@@ -2,11 +2,15 @@
 
 Copyright (C) askstar
 
-Versione 0.0.2
+Versione 0.1.1
 
 KiCad Backport crea una copia di un progetto o file KiCad che puo essere aperta
 con una versione precedente di KiCad. Il progetto originale non viene
 sovrascritto.
+
+La versione 0.1.1 supporta i progetti salvati dalle versioni nightly attuali di
+KiCad 10.99 e puo scrivere copie compatibili con KiCad 10, KiCad 9, KiCad 8 o
+KiCad 7.
 
 ## Lingua
 
@@ -28,6 +32,16 @@ Il plugin sceglie automaticamente il convertitore adatto al sistema.
 
 ## Versioni di destinazione
 
+Versioni di input supportate:
+
+- KiCad 10.99 nightly
+- KiCad 10
+- KiCad 9
+- KiCad 8
+- KiCad 7
+
+Destinazioni di output supportate:
+
 - KiCad 10
 - KiCad 9
 - KiCad 8
@@ -36,12 +50,21 @@ Il plugin sceglie automaticamente il convertitore adatto al sistema.
 ## Installazione
 
 1. Chiudere KiCad.
-2. Copiare l'intera cartella `kicad_backport` nella cartella `plugins` di
-   KiCad.
-3. Per le versioni meno recenti di KiCad, copiare la stessa cartella anche in
+2. Copiare l'intera cartella `kicad_backport` nella cartella utente `plugins`
+   di KiCad.
+3. Per KiCad 10.99 e i plugin API piu recenti, usare la cartella utente
+   versionata, per esempio `C:\Users\<utente>\Documents\KiCad\10.99\plugins`.
+4. In KiCad 10.99, abilitare KiCad API/API server nelle preferenze; altrimenti
+   KiCad non rileva e non carica i plugin API.
+5. Per le versioni meno recenti di KiCad, copiare la stessa cartella anche in
    `scripting/plugins`.
-4. Riavviare KiCad.
-5. Avviare `Crea backport KiCad`.
+6. Riavviare KiCad.
+7. Avviare `Crea backport KiCad`.
+
+In KiCad 10.99 i plugin API non vengono caricati dalla cartella di scripting
+stock dell'installazione, per esempio `share/kicad/scripting/plugins`; usare
+invece la cartella utente `plugins` e verificare che KiCad API/API server sia
+abilitato.
 
 ## Uso
 

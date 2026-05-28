@@ -83,9 +83,6 @@ def command_prefix(root: Path) -> list[str]:
     exe_names = [
         f"kicad-backport-{goos}-{goarch}{suffix}",
         f"kicad-backport-{goos}{suffix}",
-        f"kicad-backport{suffix}",
-        "kicad-backport.exe",
-        "kicad-backport",
     ]
     for name in exe_names:
         candidate = root / "bin" / name
@@ -647,6 +644,145 @@ def run_wx_gui(lang: str):
     return 0
 
 
+def run_tk_gui(lang: str) -> int:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+
+    tr = lambda key: translate(key, lang)
+    root = tk.Tk()
+    root.title(tr("app_title"))
+    root.minsize(*WINDOW_MIN_SIZE)
+
+    mode_var = tk.StringVar(value=translate("mode_project", lang))
+    input_var = tk.StringVar()
+    output_var = tk.StringVar()
+    target_var = tk.StringVar(value="8.0")
+    status_var = tk.StringVar(value=tr("initial_status"))
+    footer_var = tk.StringVar(value=f"{tr('version_label').format(version='...')}    |    {tr('copyright')}")
+
+    def selected_mode() -> str:
+        return mode_from_label(mode_var.get(), lang)
+
+    def update_default_output(*_args) -> None:
+        input_path = input_var.get().strip()
+        if input_path:
+            output_var.set(default_output_path(input_path, target_var.get()))
+
+    def update_default_input(*_args) -> None:
+        input_path = detect_default_input_path(selected_mode())
+        if input_path:
+            input_var.set(input_path)
+            update_default_output()
+
+    def choose_file() -> None:
+        path = filedialog.askopenfilename(
+            title=tr("input_label"),
+            initialdir=dialog_initial_dir(input_var.get()),
+            filetypes=[
+                (tr("kicad_files"), "*.kicad_pro *.kicad_sch *.kicad_pcb *.kicad_sym *.kicad_mod *.kicad_wks *.kicad_dru"),
+                (tr("all_files"), "*.*"),
+            ],
+        )
+        if path:
+            input_var.set(path)
+            update_default_output()
+
+    def choose_folder() -> None:
+        path = filedialog.askdirectory(title=tr("input_label"), initialdir=dialog_initial_dir(input_var.get()))
+        if path:
+            input_var.set(path)
+            update_default_output()
+
+    def choose_output_file() -> None:
+        path = filedialog.asksaveasfilename(title=tr("output_label"), initialdir=dialog_initial_dir(output_var.get()))
+        if path:
+            output_var.set(path)
+
+    def choose_output_folder() -> None:
+        path = filedialog.askdirectory(title=tr("output_label"), initialdir=dialog_initial_dir(output_var.get()))
+        if path:
+            output_var.set(path)
+
+    outer = ttk.Frame(root, padding=14)
+    outer.grid(row=0, column=0, sticky="nsew")
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=1)
+    outer.columnconfigure(1, weight=1)
+
+    ttk.Label(outer, text=tr("mode_label")).grid(row=0, column=0, sticky="w", padx=(0, 8))
+    mode_combo = ttk.Combobox(outer, textvariable=mode_var, values=mode_choices(lang), state="readonly", width=18)
+    mode_combo.grid(row=0, column=1, sticky="w")
+    ttk.Label(outer, text=tr("target_label")).grid(row=0, column=2, sticky="w", padx=(18, 8))
+    target_combo = ttk.Combobox(outer, textvariable=target_var, values=TARGETS, state="readonly", width=8)
+    target_combo.grid(row=0, column=3, sticky="w")
+    convert_button = ttk.Button(outer, text=tr("convert_button"))
+    convert_button.grid(row=0, column=4, sticky="e", padx=(18, 0))
+
+    ttk.Label(outer, text=tr("input_label")).grid(row=1, column=0, columnspan=5, sticky="w", pady=(14, 0))
+    ttk.Entry(outer, textvariable=input_var).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0), padx=(0, 8))
+    ttk.Button(outer, text=tr("file_button"), command=choose_file).grid(row=2, column=3, sticky="ew", pady=(8, 0), padx=(0, 6))
+    ttk.Button(outer, text=tr("folder_button"), command=choose_folder).grid(row=2, column=4, sticky="ew", pady=(8, 0))
+
+    ttk.Label(outer, text=tr("output_label")).grid(row=3, column=0, columnspan=5, sticky="w", pady=(12, 0))
+    ttk.Entry(outer, textvariable=output_var).grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0), padx=(0, 8))
+    ttk.Button(outer, text=tr("save_as_button"), command=choose_output_file).grid(row=4, column=3, sticky="ew", pady=(8, 0), padx=(0, 6))
+    ttk.Button(outer, text=tr("folder_button"), command=choose_output_folder).grid(row=4, column=4, sticky="ew", pady=(8, 0))
+
+    ttk.Label(outer, textvariable=status_var).grid(row=5, column=0, columnspan=5, sticky="w", pady=(14, 0))
+    ttk.Label(outer, textvariable=footer_var).grid(row=6, column=0, columnspan=5, sticky="w", pady=(14, 0))
+
+    def finish_convert(result, exc, output_path: str) -> None:
+        convert_button.state(["!disabled"])
+        if exc is not None:
+            messagebox.showerror(tr("app_title"), localized_error_message(str(exc), lang), parent=root)
+            status_var.set(tr("failed_status"))
+            return
+        if result.returncode != 0:
+            messagebox.showerror(tr("app_title"), localized_error_message(result.stderr or result.stdout, lang), parent=root)
+            status_var.set(tr("failed_status"))
+            return
+        report_path = str(report_path_for(output_path))
+        messagebox.showinfo(tr("app_title"), success_message(output_path, report_path, result.stderr or "", lang), parent=root)
+        status_var.set(tr("complete_status"))
+
+    def convert() -> None:
+        input_path = input_var.get().strip()
+        raw_output_path = output_var.get().strip()
+        target = target_var.get().strip()
+        if not input_path or not raw_output_path:
+            messagebox.showerror(tr("app_title"), tr("missing_paths"), parent=root)
+            return
+        output_path = versioned_output_path(raw_output_path, target)
+        if Path(input_path).resolve() == Path(output_path).resolve():
+            messagebox.showerror(tr("app_title"), tr("same_path_error"), parent=root)
+            return
+        if Path(output_path).exists() and not messagebox.askyesno(tr("app_title"), tr("overwrite_confirm"), parent=root):
+            return
+        status_var.set(tr("converting_status"))
+        convert_button.state(["disabled"])
+
+        def worker() -> None:
+            try:
+                result = run_converter(input_path, output_path, target)
+                root.after(0, finish_convert, result, None, output_path)
+            except Exception as exc:
+                root.after(0, finish_convert, None, exc, output_path)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def load_version() -> None:
+        version = converter_version()
+        root.after(0, footer_var.set, f"{tr('version_label').format(version=version)}    |    {tr('copyright')}")
+
+    convert_button.configure(command=convert)
+    mode_combo.bind("<<ComboboxSelected>>", update_default_input)
+    target_combo.bind("<<ComboboxSelected>>", update_default_output)
+    update_default_input()
+    threading.Thread(target=load_version, daemon=True).start()
+    root.mainloop()
+    return 0
+
+
 def run_gui() -> int:
     lang = detect_language()
 
@@ -655,7 +791,13 @@ def run_gui() -> int:
     except Exception as exc:
         print(translate("wx_missing", lang), file=sys.stderr)
         print(str(exc), file=sys.stderr)
+
+    try:
+        return run_tk_gui(lang)
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
         return 1
+
 
 
 def main() -> int:

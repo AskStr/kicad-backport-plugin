@@ -2,12 +2,15 @@
 
 Copyright (C) 问星/askstar
 
-Version 0.0.2
+Version 0.1.1
 
 KiCad Backport helps you create a copy of a KiCad project or file that
 can be opened by an older KiCad version.
 
 The original project is not overwritten.
+
+Version 0.1.1 supports projects saved by current KiCad 10.99 nightly builds
+and can write KiCad 10, KiCad 9, KiCad 8, or KiCad 7 compatible copies.
 
 The plugin automatically follows your KiCad or system language when possible.
 The current user interface includes English, Simplified Chinese, Traditional
@@ -52,6 +55,16 @@ system. No manual command-line setup is needed for normal KiCad use.
 
 ## Supported Targets
 
+Supported input versions:
+
+- KiCad 10.99 nightly
+- KiCad 10
+- KiCad 9
+- KiCad 8
+- KiCad 7
+
+Supported output targets:
+
 - KiCad 10
 - KiCad 9
 - KiCad 8
@@ -63,15 +76,23 @@ work.
 ## Install
 
 1. Close KiCad.
-2. Copy the whole `kicad_backport` folder into your KiCad `plugins` folder.
-3. For older KiCad versions, also copy the same folder into your KiCad
+2. Copy the whole `kicad_backport` folder into your KiCad user `plugins`
+   folder.
+3. For KiCad 10.99 and newer API plugins, use the versioned user plugins
+   folder, for example `C:\Users\<you>\Documents\KiCad\10.99\plugins`.
+4. In KiCad 10.99, enable the KiCad API/API server in Preferences; otherwise
+   KiCad will not discover or load API plugins.
+5. For older KiCad versions, also copy the same folder into your KiCad
    `scripting/plugins` folder.
-4. Start KiCad again.
-5. Open the KiCad Plugin Manager or the application toolbar/menu and look for
+6. Start KiCad again.
+7. Open the KiCad Plugin Manager or the application toolbar/menu and look for
    `Create KiCad Backport`.
 
 If the action does not appear, confirm the folder was copied into the plugin
-folder for the KiCad version you are currently using.
+folder for the KiCad version you are currently using. In KiCad 10.99, API
+plugins are not loaded from the installed stock scripting folder such as
+`share/kicad/scripting/plugins`; use the user `plugins` folder instead and make
+sure the KiCad API/API server is enabled.
 
 ## Use
 

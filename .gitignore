@@ -1,0 +1,24 @@
+# Ignore everything by default.
+*
+
+# Keep this ignore file.
+!.gitignore
+
+# Keep root Python source and plugin metadata/docs.
+!*.py
+!__init__.py
+!plugin.json
+!requirements.txt
+!README.md
+
+# Keep runtime assets, binaries, and KiCad plugin Python sources.
+!bin/
+!bin/**
+!assets/
+!assets/**
+!legacy/
+!legacy/**
+!plugin/
+!plugin/**
+!docs/
+!docs/**

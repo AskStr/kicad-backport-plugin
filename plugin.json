@@ -1,0 +1,37 @@
+{
+  "identifier": "com.askstar.kicad.backport",
+  "name": "KiCad Backport",
+  "version": "0.0.2",
+  "description": "Create a compatibility copy of a KiCad file or project for older KiCad releases.",
+  "copyright": "问星/askstar",
+  "runtime": {
+    "type": "python",
+    "min_version": "3.8"
+  },
+  "actions": [
+    {
+      "identifier": "convert",
+      "name": "Create KiCad Backport",
+      "description": "Create a KiCad compatibility copy for an older target version.",
+      "show-button": true,
+      "scopes": [
+        "pcb",
+        "schematic",
+        "footprint",
+        "symbol",
+        "project_manager"
+      ],
+      "entrypoint": "plugin/plugin.py",
+      "icons-light": [
+        "assets/icons/backport-light-24.png",
+        "assets/icons/backport-light-32.png",
+        "assets/icons/backport-light-48.png"
+      ],
+      "icons-dark": [
+        "assets/icons/backport-dark-24.png",
+        "assets/icons/backport-dark-32.png",
+        "assets/icons/backport-dark-48.png"
+      ]
+    }
+  ]
+}

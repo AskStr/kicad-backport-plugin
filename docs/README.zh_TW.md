@@ -2,11 +2,11 @@
 
 版權 (C) 问星
 
-版本 0.1.1
+版本 0.2.1
 
 KiCad Backport 用於建立可由舊版 KiCad 開啟的工程或檔案副本。原始工程不會被覆蓋。
 
-0.1.1 版本支援目前 KiCad 10.99 每夜版儲存的工程，並可輸出相容 KiCad 10、KiCad 9、KiCad 8 或 KiCad 7 的副本。
+0.2.1 版本支援目前 KiCad 10.99 每夜版儲存的工程，並可輸出相容 KiCad 10、KiCad 9、KiCad 8 或 KiCad 7 的副本。
 
 ## 語言
 
@@ -16,13 +16,13 @@ KiCad Backport 用於建立可由舊版 KiCad 開啟的工程或檔案副本。�
 
 ## 跨平台相容
 
+KiCad Backport 的轉換核心已全部用 Python 實作，並在外掛行程內直接執行，正常使用不再需要依平台提供獨立轉換器二進位檔。
+
 支援系統：
 
-- Windows x64 和 Windows ARM64
-- macOS Intel 和 Apple Silicon
-- Linux x64 和 Linux ARM64
-
-外掛會自動選擇目前系統對應的轉換器。
+- Windows
+- macOS
+- Linux
 
 ## 支援目標版本
 

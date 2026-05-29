@@ -2,13 +2,13 @@
 
 Copyright (C) askstar
 
-Version 0.1.1
+Version 0.2.1
 
 KiCad Backport cree une copie d'un projet ou fichier KiCad pouvant etre
 ouverte avec une ancienne version de KiCad. Le projet original n'est pas
 ecrase.
 
-La version 0.1.1 prend en charge les projets enregistres par les versions
+La version 0.2.1 prend en charge les projets enregistres par les versions
 nocturnes actuelles de KiCad 10.99 et peut ecrire des copies compatibles avec
 KiCad 10, KiCad 9, KiCad 8 ou KiCad 7.
 
@@ -22,13 +22,15 @@ francais, allemand et italien.
 
 ## Compatibilite multiplateforme
 
+Le coeur de conversion de KiCad Backport est entierement implemente en Python
+et s'execute dans le processus du plugin. Les binaires de conversion propres a
+chaque plateforme ne sont plus necessaires pour une utilisation normale.
+
 Systemes pris en charge :
 
-- Windows x64 et Windows ARM64
-- macOS Intel et Apple Silicon
-- Linux x64 et Linux ARM64
-
-Le plugin choisit automatiquement le convertisseur adapte au systeme.
+- Windows
+- macOS
+- Linux
 
 ## Versions cibles
 

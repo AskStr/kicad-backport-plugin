@@ -2,13 +2,13 @@
 
 Copyright (C) askstar
 
-Version 0.1.1
+Version 0.2.1
 
 KiCad Backport erstellt eine Kopie eines KiCad-Projekts oder einer KiCad-Datei,
 die mit einer aelteren KiCad-Version geoeffnet werden kann. Das Originalprojekt
 wird nicht ueberschrieben.
 
-Version 0.1.1 unterstuetzt Projekte, die mit aktuellen KiCad-10.99-Nightly-
+Version 0.2.1 unterstuetzt Projekte, die mit aktuellen KiCad-10.99-Nightly-
 Versionen gespeichert wurden, und kann kompatible Kopien fuer KiCad 10, KiCad
 9, KiCad 8 oder KiCad 7 schreiben.
 
@@ -22,13 +22,15 @@ traditionelles Chinesisch, Franzoesisch, Deutsch und Italienisch.
 
 ## Plattformkompatibilitaet
 
+Der Konvertierungskern von KiCad Backport ist vollstaendig in Python
+implementiert und laeuft direkt im Plugin-Prozess. Plattformspezifische
+Konverter-Binaerdateien sind fuer die normale Nutzung nicht mehr erforderlich.
+
 Unterstuetzte Systeme:
 
-- Windows x64 und Windows ARM64
-- macOS Intel und Apple Silicon
-- Linux x64 und Linux ARM64
-
-Das Plugin waehlt automatisch den passenden Konverter.
+- Windows
+- macOS
+- Linux
 
 ## Zielversionen
 

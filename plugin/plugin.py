@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import argparse
 import os
-import platform
-import subprocess
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
 from i18n import detect_language, translate
+from backport_core import VERSION as CORE_VERSION
+from backport_core import convert as convert_in_process
 
 
 TARGETS = ["10.0", "9.0", "8.0", "7.0"]
@@ -27,97 +28,19 @@ _WX_WINDOWS = []
 WINDOW_MIN_SIZE = (760, 320)
 
 
+@dataclass
+class ConversionResult:
+    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+
+
 def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
 def plugin_icon_path(size: int = 32) -> Path:
     return project_root() / "assets" / "icons" / f"backport-light-{size}.png"
-
-
-def runtime_platform() -> tuple[str, str]:
-    system = platform.system().lower()
-    os_map = {
-        "windows": "windows",
-        "cygwin": "windows",
-        "msys": "windows",
-        "linux": "linux",
-        "darwin": "darwin",
-    }
-    goos = os_map.get(system, system)
-
-    machine = (platform.machine() or "").lower()
-    arch_aliases = {
-        "x86_64": "amd64",
-        "x64": "amd64",
-        "amd64": "amd64",
-        "intel64": "amd64",
-        "i386": "386",
-        "i686": "386",
-        "x86": "386",
-        "aarch64": "arm64",
-        "arm64": "arm64",
-        "armv8": "arm64",
-    }
-    goarch = arch_aliases.get(machine, machine)
-
-    if goos == "windows":
-        env_arch = (
-            os.environ.get("PROCESSOR_ARCHITEW6432")
-            or os.environ.get("PROCESSOR_ARCHITECTURE")
-            or ""
-        ).lower()
-        goarch = arch_aliases.get(env_arch, goarch)
-
-    return goos, goarch
-
-
-def command_prefix(root: Path) -> list[str]:
-    override = os.environ.get("KICAD_BACKPORT_BINARY", "").strip()
-    if override:
-        return [override]
-
-    goos, goarch = runtime_platform()
-    suffix = ".exe" if goos == "windows" else ""
-
-    exe_names = [
-        f"kicad-backport-{goos}-{goarch}{suffix}",
-        f"kicad-backport-{goos}{suffix}",
-    ]
-    for name in exe_names:
-        candidate = root / "bin" / name
-        if candidate.exists():
-            ensure_executable(candidate, goos)
-            return [str(candidate)]
-
-    return ["go", "run", "./cmd/kicad-backport"]
-
-
-def ensure_executable(path: Path, goos: str) -> None:
-    if goos == "windows":
-        return
-    try:
-        mode = path.stat().st_mode
-        if mode & 0o111:
-            return
-        path.chmod(mode | 0o755)
-    except Exception:
-        pass
-
-
-def hidden_subprocess_kwargs() -> dict:
-    kwargs = {"stdin": subprocess.DEVNULL}
-    if platform.system().lower() != "windows":
-        kwargs["start_new_session"] = True
-        return kwargs
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = 0
-    kwargs.update({
-        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        "startupinfo": startupinfo,
-    })
-    return kwargs
 
 
 def report_path_for(output_path: str) -> Path:
@@ -250,26 +173,14 @@ def run_converter(
     output_path: str,
     target: str,
     report: Optional[str] = None,
-) -> subprocess.CompletedProcess[str]:
-    root = project_root()
-    cmd = command_prefix(root) + [
-        "convert",
-        "--target-version",
-        target,
-        "--report",
-        report or str(report_path_for(output_path)),
-        input_path,
-        output_path,
-    ]
-    return subprocess.run(
-        cmd,
-        cwd=str(root),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        **hidden_subprocess_kwargs(),
-    )
+) -> ConversionResult:
+    # Run the Python downgrade core in-process to avoid spawning a CLI per conversion.
+    report_file = report or str(report_path_for(output_path))
+    try:
+        stdout, stderr, code = convert_in_process(input_path, output_path, target, report_file)
+        return ConversionResult(code, stdout, stderr)
+    except Exception as exc:
+        return ConversionResult(1, "", f"error: {exc}\n")
 
 
 def warning_count(stderr: str) -> int:
@@ -345,22 +256,7 @@ def localized_error_message(detail: str, lang: str) -> str:
 
 
 def converter_version() -> str:
-    root = project_root()
-    try:
-        result = subprocess.run(
-            command_prefix(root) + ["version"],
-            cwd=str(root),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=3,
-            **hidden_subprocess_kwargs(),
-        )
-    except Exception:
-        return "unknown"
-    value = (result.stdout or "").strip()
-    return value if result.returncode == 0 and value else "unknown"
+    return CORE_VERSION
 
 
 def run_cli(argv: List[str]) -> int:

@@ -7,9 +7,12 @@
 # Keep root Python source and plugin metadata/docs.
 !*.py
 !__init__.py
+!build.ps1
 !plugin.json
 !requirements.txt
 !README.md
+!scripts/
+!scripts/**
 
 # Keep runtime assets, binaries, and KiCad plugin Python sources.
 !assets/

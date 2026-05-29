@@ -40,6 +40,7 @@ def launch_gui() -> None:
         raise RuntimeError("Unable to load plugin/plugin.py")
 
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     result = module.run_gui()
     if result not in (None, 0):

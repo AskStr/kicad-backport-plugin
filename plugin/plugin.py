@@ -4,7 +4,6 @@ import argparse
 import os
 import sys
 import threading
-from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
@@ -28,11 +27,11 @@ _WX_WINDOWS = []
 WINDOW_MIN_SIZE = (760, 320)
 
 
-@dataclass
 class ConversionResult:
-    returncode: int
-    stdout: str = ""
-    stderr: str = ""
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 def project_root() -> Path:

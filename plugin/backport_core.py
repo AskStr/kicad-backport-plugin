@@ -4,46 +4,63 @@ import json
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Optional
 
 
 VERSION = "0.2.1"
+ESCAPES = {"n": "\n", "t": "\t", '"': '"', "\\": "\\"}
 
 
-@dataclass
 class Node:
-    atom: str | None = None
-    quoted: bool = False
-    children: list["Node"] = field(default_factory=list)
+    __slots__ = ("atom", "quoted", "children")
+
+    def __init__(
+        self,
+        atom: str | None = None,
+        quoted: bool = False,
+        children: list["Node"] | None = None,
+    ) -> None:
+        self.atom = atom
+        self.quoted = quoted
+        self.children = [] if children is None else children
 
     @property
     def is_atom(self) -> bool:
         return self.atom is not None
 
     def head(self) -> str:
-        return self.atom_at(0)
+        children = self.children
+        if children:
+            value = children[0].atom
+            if value is not None:
+                return value
+        return ""
 
     def atom_at(self, index: int) -> str:
-        if 0 <= index < len(self.children) and self.children[index].is_atom:
-            return self.children[index].atom or ""
+        children = self.children
+        if 0 <= index < len(children):
+            value = children[index].atom
+            if value is not None:
+                return value
         return ""
 
     def set_atom_at(self, index: int, value: str, quoted: bool = False) -> bool:
-        if 0 <= index < len(self.children) and self.children[index].is_atom:
-            self.children[index].atom = value
-            self.children[index].quoted = quoted
+        children = self.children
+        if 0 <= index < len(children) and children[index].atom is not None:
+            children[index].atom = value
+            children[index].quoted = quoted
             return True
         return False
 
     def child_list(self, head: str) -> "Node | None":
         for child in self.children:
-            if not child.is_atom and child.head() == head:
+            if child.atom is None and child.head() == head:
                 return child
         return None
 
 
 def atom(value: str, quoted: bool = False) -> Node:
-    return Node(atom=value, quoted=quoted)
+    return Node(value, quoted)
 
 
 def sexpr_list(*children: Node) -> Node:
@@ -79,7 +96,7 @@ def _tokenize(text: str) -> list[tuple[str, bool]]:
                         raise ValueError("unterminated escape in quoted string")
                     escaped = text[i]
                     i += 1
-                    value.append({"n": "\n", "t": "\t", '"': '"', "\\": "\\"}.get(escaped, escaped))
+                    value.append(ESCAPES.get(escaped, escaped))
                 else:
                     value.append(ch)
             else:
@@ -110,67 +127,151 @@ def _parse_list(tokens: list[tuple[str, bool]], pos: int) -> tuple[Node, int]:
 
 
 def parse_sexpr(text: str) -> Node:
-    tokens = _tokenize(text)
-    if not tokens or tokens[0][0] != "(" or tokens[0][1]:
+    root: Node | None = None
+    stack: list[Node] = []
+    i = 1 if text.startswith("\ufeff") else 0
+    n = len(text)
+
+    while i < n:
+        ch = text[i]
+        if ch <= " " or (ch > "\x7f" and ch.isspace()):
+            i += 1
+            continue
+        if root is not None and not stack:
+            raise ValueError("trailing tokens after root expression")
+
+        if ch == "(":
+            node = Node()
+            if stack:
+                stack[-1].children.append(node)
+            elif root is None:
+                root = node
+            else:
+                raise ValueError("trailing tokens after root expression")
+            stack.append(node)
+            i += 1
+            continue
+
+        if ch == ")":
+            if not stack:
+                raise ValueError("unexpected ')'")
+            stack.pop()
+            i += 1
+            continue
+
+        if not stack:
+            raise ValueError("expected '('")
+
+        if ch == '"':
+            i += 1
+            value: list[str] = []
+            while i < n:
+                ch = text[i]
+                i += 1
+                if ch == '"':
+                    stack[-1].children.append(Node(atom="".join(value), quoted=True))
+                    break
+                if ch == "\\":
+                    if i >= n:
+                        raise ValueError("unterminated escape in quoted string")
+                    escaped = text[i]
+                    i += 1
+                    value.append(ESCAPES.get(escaped, escaped))
+                else:
+                    value.append(ch)
+            else:
+                raise ValueError("unterminated quoted string")
+            continue
+
+        start = i
+        while i < n:
+            ch = text[i]
+            if ch in "()" or ch <= " " or (ch > "\x7f" and ch.isspace()):
+                break
+            i += 1
+        stack[-1].children.append(Node(atom=text[start:i]))
+
+    if root is None:
         raise ValueError("expected '('")
-    root, pos = _parse_list(tokens, 1)
-    if pos != len(tokens):
-        raise ValueError("trailing tokens after root expression")
+    if stack:
+        raise ValueError("unexpected end of input: unclosed '('")
     return root
 
 
 def _needs_quotes(value: str) -> bool:
-    return not value or any(ch.isspace() or ch in '()"' for ch in value)
+    if not value:
+        return True
+    for ch in value:
+        if ch in '()"' or ch <= " " or (ch > "\x7f" and ch.isspace()):
+            return True
+    return False
 
 
 def _escape_atom(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
 
 
-def _format_atom(node: Node) -> str:
+def _format_atom(node: Node, cache: dict[tuple[str, bool], str] | None = None) -> str:
     value = node.atom or ""
+    quoted = node.quoted
+    if cache is not None:
+        key = (value, quoted)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
     if node.quoted or _needs_quotes(value):
-        return f'"{_escape_atom(value)}"'
-    return value
+        formatted = f'"{_escape_atom(value)}"'
+    else:
+        formatted = value
+    if cache is not None:
+        cache[(value, quoted)] = formatted
+    return formatted
 
 
-def _should_inline(node: Node) -> bool:
-    if not node.children:
-        return True
+def _inline_parts(node: Node, cache: dict[tuple[str, bool], str]) -> list[str] | None:
+    children = node.children
+    if not children:
+        return []
+    parts: list[str] = []
     total = 2
-    for i, child in enumerate(node.children):
-        if not child.is_atom:
-            return False
-        total += (1 if i else 0) + len(_format_atom(child))
-    return total <= 88
+    for i, child in enumerate(children):
+        if child.atom is None:
+            return None
+        value = _format_atom(child, cache)
+        total += (1 if i else 0) + len(value)
+        if total > 88:
+            return None
+        parts.append(value)
+    return parts
 
 
-def _write_node(node: Node, indent: int, out: list[str]) -> None:
-    if node.is_atom:
-        out.append(_format_atom(node))
+def _write_node(node: Node, indent: int, out: list[str], cache: dict[tuple[str, bool], str]) -> None:
+    if node.atom is not None:
+        out.append(_format_atom(node, cache))
         return
     out.append("(")
     if not node.children:
         out.append(")")
         return
-    if _should_inline(node):
-        for i, child in enumerate(node.children):
+    inline_parts = _inline_parts(node, cache)
+    if inline_parts is not None:
+        for i, value in enumerate(inline_parts):
             if i:
                 out.append(" ")
-            _write_node(child, indent, out)
+            out.append(value)
         out.append(")")
         return
-    _write_node(node.children[0], indent + 2, out)
+    _write_node(node.children[0], indent + 2, out, cache)
     for child in node.children[1:]:
         out.append("\n")
         out.append(" " * (indent + 2))
-        _write_node(child, indent + 2, out)
+        _write_node(child, indent + 2, out, cache)
     out.append(")")
 
 
 def format_sexpr(root: Node) -> str:
     out: list[str] = []
-    _write_node(root, 0, out)
+    _write_node(root, 0, out, {})
     out.append("\n")
     return "".join(out)
 
@@ -367,28 +468,140 @@ BOARD_RULES: tuple[FeatureRule, ...] = (
 
 
 def _walk(node: Node) -> Iterable[Node]:
-    if node.is_atom:
+    if node.atom is not None:
         return
-    yield node
-    for child in node.children:
-        if not child.is_atom:
-            yield from _walk(child)
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.atom is not None:
+            continue
+        yield current
+        for child in reversed(current.children):
+            if child.atom is None:
+                stack.append(child)
 
 
 def remove_descendants_by_head(root: Node, heads: set[str]) -> int:
-    if root.is_atom:
+    if root.atom is not None:
         return 0
     removed = 0
     kept: list[Node] = []
     for child in root.children:
-        if not child.is_atom and child.head() in heads:
+        if child.atom is None and child.head() in heads:
             removed += 1
             continue
-        if not child.is_atom:
+        if child.atom is None:
             removed += remove_descendants_by_head(child, heads)
         kept.append(child)
     root.children = kept
     return removed
+
+
+def remove_descendants_by_rule(root: Node, rules: Iterable[FeatureRule], target: int) -> list[tuple[FeatureRule, int]]:
+    active = [(rule, set(rule[1])) for rule in rules if target < rule[0]]
+    if not active or root.atom is not None:
+        return []
+
+    counts = [0] * len(active)
+
+    def visit(node: Node) -> None:
+        kept: list[Node] = []
+        for child in node.children:
+            if child.atom is None:
+                child_head = child.head()
+                removed = False
+                for index, (_rule, heads) in enumerate(active):
+                    if child_head in heads:
+                        counts[index] += 1
+                        removed = True
+                        break
+                if removed:
+                    continue
+                visit(child)
+            kept.append(child)
+        node.children = kept
+
+    visit(root)
+    return [(active[index][0], count) for index, count in enumerate(counts) if count]
+
+
+DescendantRemovalRule = tuple[set[str], str]
+ContainingChildRemovalRule = tuple[str, str, str]
+
+
+def apply_descendant_removal_rules(root: Node, warnings: list[str], rules: list[DescendantRemovalRule]) -> None:
+    if not rules or root.atom is not None:
+        return
+
+    counts = [0] * len(rules)
+
+    def visit(node: Node) -> None:
+        kept: list[Node] = []
+        for child in node.children:
+            if child.atom is None:
+                child_head = child.head()
+                removed = False
+                for index, (heads, _message) in enumerate(rules):
+                    if child_head in heads:
+                        counts[index] += 1
+                        removed = True
+                        break
+                if removed:
+                    continue
+                visit(child)
+            kept.append(child)
+        node.children = kept
+
+    visit(root)
+    for index, count in enumerate(counts):
+        if count:
+            warnings.append(rules[index][1])
+
+
+def apply_structural_removal_rules(
+    root: Node,
+    warnings: list[str],
+    descendant_rules: list[DescendantRemovalRule],
+    containing_child_rules: list[ContainingChildRemovalRule],
+) -> None:
+    if root.atom is not None:
+        return
+    if not descendant_rules and not containing_child_rules:
+        return
+
+    descendant_counts = [0] * len(descendant_rules)
+    containing_counts = [0] * len(containing_child_rules)
+
+    def visit(node: Node) -> None:
+        kept: list[Node] = []
+        for child in node.children:
+            if child.atom is None:
+                child_head = child.head()
+                removed = False
+                for index, (heads, _message) in enumerate(descendant_rules):
+                    if child_head in heads:
+                        descendant_counts[index] += 1
+                        removed = True
+                        break
+                if not removed:
+                    for index, (parent_head, child_head_to_find, _message) in enumerate(containing_child_rules):
+                        if child_head == parent_head and child.child_list(child_head_to_find):
+                            containing_counts[index] += 1
+                            removed = True
+                            break
+                if removed:
+                    continue
+                visit(child)
+            kept.append(child)
+        node.children = kept
+
+    visit(root)
+    for index, count in enumerate(containing_counts):
+        if count:
+            warnings.append(containing_child_rules[index][2])
+    for index, count in enumerate(descendant_counts):
+        if count:
+            warnings.append(descendant_rules[index][1])
 
 
 def remove_children_from_parents(root: Node, parents: set[str], children: set[str]) -> int:
@@ -396,14 +609,106 @@ def remove_children_from_parents(root: Node, parents: set[str], children: set[st
     for node in _walk(root):
         if node.head() in parents:
             before = len(node.children)
-            node.children = [c for c in node.children if c.is_atom or c.head() not in children]
+            node.children = [c for c in node.children if c.atom is not None or c.head() not in children]
             removed += before - len(node.children)
     return removed
 
 
+ChildRemovalRule = tuple[set[str], set[str], str]
+ChildValueRewriteRule = tuple[str, Optional[set[str]], set[str], str]
+
+
+def apply_child_removal_rules(root: Node, warnings: list[str], rules: list[ChildRemovalRule]) -> None:
+    if not rules:
+        return
+
+    counts = [0] * len(rules)
+    parent_heads: set[str] = set()
+    for parents, _children, _message in rules:
+        parent_heads.update(parents)
+
+    for node in _walk(root):
+        node_head = node.head()
+        if node_head not in parent_heads:
+            continue
+
+        kept: list[Node] = []
+        for child in node.children:
+            if child.atom is not None:
+                kept.append(child)
+                continue
+            child_head = child.head()
+            removed = False
+            for index, (parents, children, _message) in enumerate(rules):
+                if node_head in parents and child_head in children:
+                    counts[index] += 1
+                    removed = True
+                    break
+            if not removed:
+                kept.append(child)
+        node.children = kept
+
+    for index, count in enumerate(counts):
+        if count:
+            warnings.append(rules[index][2])
+
+
+def apply_child_value_rewrite_rules(root: Node, warnings: list[str], rules: list[ChildValueRewriteRule]) -> None:
+    if not rules:
+        return
+
+    counts = [0] * len(rules)
+    all_heads: set[str] = set()
+    for _mode, _parents, heads, _message in rules:
+        all_heads.update(heads)
+
+    for node in _walk(root):
+        node_head = node.head()
+        kept: list[Node] = []
+        for child in node.children:
+            if child.atom is not None:
+                kept.append(child)
+                continue
+
+            child_head = child.head()
+            if child_head not in all_heads:
+                kept.append(child)
+                continue
+
+            handled = False
+            for index, (mode, parents, heads, _message) in enumerate(rules):
+                if child_head not in heads or (parents is not None and node_head not in parents):
+                    continue
+                if mode == "bool-list":
+                    if _bool_value(child.atom_at(1), True):
+                        kept.append(atom(child_head))
+                    counts[index] += 1
+                    handled = True
+                    break
+                if mode == "presence-bool" and len(child.children) > 1:
+                    value = child.atom_at(1).lower()
+                    if value in {"yes", "true", "1"}:
+                        child.children = child.children[:1]
+                        kept.append(child)
+                        counts[index] += 1
+                        handled = True
+                        break
+                    if value in {"no", "false", "0"}:
+                        counts[index] += 1
+                        handled = True
+                        break
+            if not handled:
+                kept.append(child)
+        node.children = kept
+
+    for index, count in enumerate(counts):
+        if count:
+            warnings.append(rules[index][3])
+
+
 def remove_direct_children_by_head(root: Node, head: str) -> int:
     before = len(root.children)
-    root.children = [c for c in root.children if c.is_atom or c.head() != head]
+    root.children = [c for c in root.children if c.atom is not None or c.head() != head]
     return before - len(root.children)
 
 
@@ -412,7 +717,7 @@ def rename_child_head_in_parents(root: Node, parents: set[str], old: str, new: s
     for node in _walk(root):
         if node.head() in parents:
             for child in node.children:
-                if not child.is_atom and child.head() == old and child.set_atom_at(0, new):
+                if child.atom is None and child.head() == old and child.set_atom_at(0, new):
                     changed += 1
     return changed
 
@@ -423,7 +728,7 @@ def remove_atoms_from_headed_lists(root: Node, parents: set[str], atoms: set[str
         if node.head() in parents:
             kept = [node.children[0]]
             for child in node.children[1:]:
-                if child.is_atom and child.atom in atoms:
+                if child.atom is not None and child.atom in atoms:
                     removed += 1
                 else:
                     kept.append(child)
@@ -436,7 +741,7 @@ def flatten_child_lists_to_atoms_in_parents(root: Node, parents: set[str], child
     for node in _walk(root):
         if node.head() in parents:
             for i, child in enumerate(node.children):
-                if not child.is_atom and child.head() in children:
+                if child.atom is None and child.head() in children:
                     node.children[i] = atom(child.head())
                     changed += 1
     return changed
@@ -444,10 +749,10 @@ def flatten_child_lists_to_atoms_in_parents(root: Node, parents: set[str], child
 
 def downgrade_bool_lists_to_atoms(root: Node, heads: set[str]) -> int:
     changed = 0
-    for node in list(_walk(root)):
+    for node in _walk(root):
         kept: list[Node] = []
         for child in node.children:
-            if not child.is_atom and child.head() in heads:
+            if child.atom is None and child.head() in heads:
                 if _bool_value(child.atom_at(1), True):
                     kept.append(atom(child.head()))
                 changed += 1
@@ -459,10 +764,10 @@ def downgrade_bool_lists_to_atoms(root: Node, heads: set[str]) -> int:
 
 def downgrade_boolean_presence_nodes(root: Node, heads: set[str]) -> int:
     changed = 0
-    for node in list(_walk(root)):
+    for node in _walk(root):
         kept: list[Node] = []
         for child in node.children:
-            if not child.is_atom and child.head() in heads and len(child.children) > 1:
+            if child.atom is None and child.head() in heads and len(child.children) > 1:
                 value = child.atom_at(1).lower()
                 if value in {"yes", "true", "1"}:
                     child.children = child.children[:1]
@@ -484,7 +789,7 @@ def downgrade_font_style_lists_to_atoms(root: Node) -> int:
             continue
         kept: list[Node] = []
         for child in node.children:
-            if not child.is_atom and child.head() in {"bold", "italic"} and len(child.children) > 1:
+            if child.atom is None and child.head() in {"bold", "italic"} and len(child.children) > 1:
                 if _bool_value(child.atom_at(1), True):
                     kept.append(atom(child.head()))
                 changed += 1
@@ -502,7 +807,7 @@ def ensure_legacy_property_ids(root: Node) -> int:
             continue
         next_id = 5
         for child in node.children:
-            if child.is_atom or child.head() != "property":
+            if child.atom is not None or child.head() != "property":
                 continue
             if child.atom_at(1) in standard or child.child_list("id"):
                 continue
@@ -520,10 +825,10 @@ def move_property_hide_to_effects(root: Node) -> int:
         hidden = False
         kept: list[Node] = []
         for child in node.children:
-            if child.is_atom and child.atom == "hide":
+            if child.atom is not None and child.atom == "hide":
                 hidden = True
                 changed += 1
-            elif not child.is_atom and child.head() == "hide":
+            elif child.atom is None and child.head() == "hide":
                 hidden = _bool_value(child.atom_at(1), True)
                 changed += 1
             else:
@@ -563,12 +868,12 @@ def _property_node(name: str, value: str) -> Node:
 
 def downgrade_pcb_footprint_fields(root: Node) -> int:
     changed = 0
-    for node in list(_walk(root)):
+    for node in _walk(root):
         if node.head() not in {"footprint", "module"}:
             continue
         kept: list[Node] = []
         for child in node.children:
-            if child.is_atom:
+            if child.atom is not None:
                 kept.append(child)
                 continue
             if child.head() == "property":
@@ -577,7 +882,7 @@ def downgrade_pcb_footprint_fields(root: Node) -> int:
                     kind = "reference" if name == "Reference" else "value"
                     text = sexpr_list(atom("fp_text"), atom(kind), atom(child.atom_at(2), True))
                     for sub in child.children[3:]:
-                        if not sub.is_atom and sub.head() == "hide":
+                        if sub.atom is None and sub.head() == "hide":
                             if _bool_value(sub.atom_at(1), True):
                                 text.children.append(atom("hide"))
                         else:
@@ -610,7 +915,7 @@ def downgrade_user_layer_types(root: Node) -> int:
     for node in _walk(root):
         if node.head() == "layers":
             for layer in node.children:
-                if not layer.is_atom and len(layer.children) >= 4:
+                if layer.atom is None and len(layer.children) >= 4:
                     if layer.atom_at(1).startswith("User.") and layer.atom_at(2) in {"front", "back", "auxiliary"}:
                         layer.set_atom_at(2, "user")
                         changed += 1
@@ -622,7 +927,7 @@ def downgrade_pcbplotparams_bools(root: Node) -> int:
     for node in _walk(root):
         if node.head() == "pcbplotparams":
             for child in node.children:
-                if not child.is_atom and len(child.children) > 1:
+                if child.atom is None and len(child.children) > 1:
                     value = child.atom_at(1).lower()
                     if value == "yes" and child.set_atom_at(1, "true"):
                         changed += 1
@@ -660,7 +965,7 @@ def ensure_zone_filled_areas_thickness(root: Node) -> int:
         if node.head() == "zone" and node.child_list("filled_polygon") and not node.child_list("filled_areas_thickness"):
             insert_at = len(node.children)
             for i, child in enumerate(node.children[1:], 1):
-                if not child.is_atom and child.head() == "fill":
+                if child.atom is None and child.head() == "fill":
                     insert_at = i
                     break
             node.children.insert(insert_at, sexpr_list(atom("filled_areas_thickness"), atom("no")))
@@ -670,10 +975,10 @@ def ensure_zone_filled_areas_thickness(root: Node) -> int:
 
 def remove_nodes_containing_child(root: Node, parent_head: str, child_head: str) -> int:
     removed = 0
-    for node in list(_walk(root)):
+    for node in _walk(root):
         kept: list[Node] = []
         for child in node.children:
-            if not child.is_atom and child.head() == parent_head and child.child_list(child_head):
+            if child.atom is None and child.head() == parent_head and child.child_list(child_head):
                 removed += 1
             else:
                 kept.append(child)
@@ -686,7 +991,7 @@ def replace_atom_values_in_parents(root: Node, parents: set[str], old: str, new:
     for node in _walk(root):
         if node.head() in parents:
             for child in node.children:
-                if child.is_atom and child.atom == old:
+                if child.atom is not None and child.atom == old:
                     child.atom = new
                     changed += 1
     return changed
@@ -698,7 +1003,7 @@ def downgrade_dimensions_to_text(root: Node) -> int:
         changed = 0
         kept: list[Node] = []
         for child in node.children:
-            if not child.is_atom and child.head() == "dimension":
+            if child.atom is None and child.head() == "dimension":
                 source = child.child_list("gr_text")
                 if source:
                     text = sexpr_list(atom("fp_text" if inside else "gr_text"))
@@ -710,7 +1015,7 @@ def downgrade_dimensions_to_text(root: Node) -> int:
                     kept.append(text)
                 changed += 1
             else:
-                if not child.is_atom:
+                if child.atom is None:
                     changed += convert(child, inside)
                 kept.append(child)
         node.children = kept
@@ -729,7 +1034,7 @@ def downgrade_board_net_names_to_codes(root: Node) -> int:
             next_code += 1
 
     for child in root.children:
-        if not child.is_atom and child.head() == "net":
+        if child.atom is None and child.head() == "net":
             if _is_int_atom(child.atom_at(1)):
                 code = _to_int(child.atom_at(1))
                 name = child.atom_at(2)
@@ -760,7 +1065,7 @@ def downgrade_board_net_names_to_codes(root: Node) -> int:
                 changed += 1
         head = node.head()
         for child in node.children:
-            if not child.is_atom:
+            if child.atom is None:
                 rewrite(child, head)
 
     rewrite(root)
@@ -768,7 +1073,7 @@ def downgrade_board_net_names_to_codes(root: Node) -> int:
     existing_codes = {
         _to_int(c.atom_at(1))
         for c in root.children
-        if not c.is_atom and c.head() == "net" and _is_int_atom(c.atom_at(1))
+        if c.atom is None and c.head() == "net" and _is_int_atom(c.atom_at(1))
     }
     new_entries = sorted(((name, code) for name, code in codes.items() if code not in existing_codes), key=lambda item: (item[1], item[0]))
     if new_entries and root.head() == "kicad_pcb":
@@ -781,9 +1086,9 @@ def downgrade_board_net_names_to_codes(root: Node) -> int:
         first_item = len(root.children)
 
         for i, child in enumerate(root.children):
-            if not child.is_atom and child.head() == "net":
+            if child.atom is None and child.head() == "net":
                 last_net = i
-            elif not child.is_atom and child.head() in item_heads and first_item == len(root.children):
+            elif child.atom is None and child.head() in item_heads and first_item == len(root.children):
                 first_item = i
 
         # Legacy net declarations must stay after setup metadata and before board items.
@@ -798,10 +1103,7 @@ def downgrade_board_net_names_to_codes(root: Node) -> int:
 
 def remove_introduced(root: Node, target: int, rules: Iterable[FeatureRule]) -> list[str]:
     warnings: list[str] = []
-    for min_version, heads, reason in rules:
-        if target >= min_version:
-            continue
-        removed = remove_descendants_by_head(root, set(heads))
+    for (min_version, _heads, reason), removed in remove_descendants_by_rule(root, rules, target):
         if removed:
             warnings.append(f"removed {removed} node(s) introduced in {min_version}: {reason}")
     return warnings
@@ -817,100 +1119,138 @@ def _apply_when(warnings: list[str], condition: bool, rewrite: Callable[[], int]
         _warn_if_changed(warnings, rewrite(), message)
 
 
+def _queue_child_removal(
+    rules: list[ChildRemovalRule],
+    condition: bool,
+    parents: set[str],
+    children: set[str],
+    message: str,
+) -> None:
+    if condition:
+        rules.append((parents, children, message))
+
+
+def _queue_descendant_removal(
+    rules: list[DescendantRemovalRule],
+    condition: bool,
+    heads: set[str],
+    message: str,
+) -> None:
+    if condition:
+        rules.append((heads, message))
+
+
 def apply_downgrade_rules(doc: Document, target: int) -> list[str]:
     root = doc.root
     warnings: list[str] = []
 
     if doc.kind == "symbol-library":
+        child_removals: list[ChildRemovalRule] = []
         warnings.extend(remove_introduced(root, target, SYMBOL_RULES))
         _apply_when(warnings, target < 20231120, lambda: remove_direct_children_by_head(root, "generator_version"), "removed symbol library generator_version fields")
         _apply_when(warnings, target < 20241209, lambda: remove_descendants_by_head(root, {"embedded_fonts"}), "removed symbol library embedded_fonts fields")
         _apply_when(warnings, target < 20240108, lambda: downgrade_font_style_lists_to_atoms(root), "downgraded symbol library font bold/italic bool fields")
-        _apply_when(warnings, target <= 20241209, lambda: remove_children_from_parents(root, {"font"}, {"face"}), "removed symbol library font face fields")
+        _queue_child_removal(child_removals, target <= 20241209, {"font"}, {"face"}, "removed symbol library font face fields")
         if target < 20241004:
             _warn_if_changed(warnings, downgrade_bool_lists_to_atoms(root, {"hide"}), "downgraded symbol library boolean hide fields")
             _warn_if_changed(warnings, flatten_child_lists_to_atoms_in_parents(root, {"pin_names", "pin_numbers"}, {"hide"}), "downgraded symbol pin visibility fields")
         if target < 20241209:
             _warn_if_changed(warnings, ensure_legacy_property_ids(root), "added legacy symbol property ids")
             _warn_if_changed(warnings, move_property_hide_to_effects(root), "moved symbol property hide flags to effects")
-        _apply_when(warnings, target < 20251024, lambda: remove_children_from_parents(root, {"symbol"}, {"in_pos_files"}), "removed symbol library position file flags")
-        _apply_when(warnings, target < 20250324, lambda: remove_children_from_parents(root, {"symbol"}, {"duplicate_pin_numbers_are_jumpers"}), "removed symbol library jumper pin-number flags")
-        _apply_when(warnings, target < 20250227, lambda: remove_children_from_parents(root, {"symbol"}, {"power"}), "removed symbol library power class flags")
-        _apply_when(warnings, target < 20251024, lambda: remove_children_from_parents(root, {"property"}, {"show_name", "do_not_autoplace"}), "removed symbol property formatting fields")
+        _queue_child_removal(child_removals, target < 20251024, {"symbol"}, {"in_pos_files"}, "removed symbol library position file flags")
+        _queue_child_removal(child_removals, target < 20250324, {"symbol"}, {"duplicate_pin_numbers_are_jumpers"}, "removed symbol library jumper pin-number flags")
+        _queue_child_removal(child_removals, target < 20250227, {"symbol"}, {"power"}, "removed symbol library power class flags")
+        _queue_child_removal(child_removals, target < 20251024, {"property"}, {"show_name", "do_not_autoplace"}, "removed symbol property formatting fields")
+        apply_child_removal_rules(root, warnings, child_removals)
 
     elif doc.kind == "schematic":
+        child_removals = []
+        descendant_removals: list[DescendantRemovalRule] = []
         warnings.extend(remove_introduced(root, target, SCHEMATIC_RULES))
         _apply_when(warnings, target < 20231120, lambda: remove_direct_children_by_head(root, "generator_version"), "removed schematic generator_version fields")
-        _apply_when(warnings, target < 20260326, lambda: remove_descendants_by_head(root, {"locked"}), "removed schematic locked fields introduced after target version")
-        _apply_when(warnings, target < 20260306, lambda: remove_descendants_by_head(root, {"embedded_fonts"}), "removed schematic embedded_fonts fields")
-        _apply_when(warnings, target < 20250827, lambda: remove_descendants_by_head(root, {"body_styles", "body_style"}), "removed schematic custom body style fields")
-        _apply_when(warnings, target < 20250114, lambda: remove_children_from_parents(root, {"text", "text_box", "textbox"}, {"exclude_from_sim"}), "removed schematic text simulation flags")
-        _apply_when(warnings, target < 20260306, lambda: remove_children_from_parents(root, {"sheet"}, {"exclude_from_sim", "in_bom", "on_board", "dnp"}), "removed schematic sheet assembly/simulation flags")
+        _queue_descendant_removal(descendant_removals, target < 20260326, {"locked"}, "removed schematic locked fields introduced after target version")
+        _queue_descendant_removal(descendant_removals, target < 20260306, {"embedded_fonts"}, "removed schematic embedded_fonts fields")
+        _queue_descendant_removal(descendant_removals, target < 20250827, {"body_styles", "body_style"}, "removed schematic custom body style fields")
+        apply_descendant_removal_rules(root, warnings, descendant_removals)
+        _queue_child_removal(child_removals, target < 20250114, {"text", "text_box", "textbox"}, {"exclude_from_sim"}, "removed schematic text simulation flags")
+        _queue_child_removal(child_removals, target < 20260306, {"sheet"}, {"exclude_from_sim", "in_bom", "on_board", "dnp"}, "removed schematic sheet assembly/simulation flags")
         _apply_when(warnings, target <= 20230121, lambda: remove_descendants_by_head(root, {"exclude_from_sim"}), "removed schematic simulation exclusion flags")
-        _apply_when(warnings, target < 20251024, lambda: remove_children_from_parents(root, {"symbol"}, {"in_pos_files"}), "removed schematic symbol position file flags")
-        _apply_when(warnings, target < 20250324, lambda: remove_children_from_parents(root, {"symbol"}, {"duplicate_pin_numbers_are_jumpers"}), "removed schematic library symbol jumper pin-number flags")
-        _apply_when(warnings, target < 20250227, lambda: remove_children_from_parents(root, {"symbol"}, {"power"}), "removed schematic library symbol power class flags")
+        _queue_child_removal(child_removals, target < 20251024, {"symbol"}, {"in_pos_files"}, "removed schematic symbol position file flags")
+        _queue_child_removal(child_removals, target < 20250324, {"symbol"}, {"duplicate_pin_numbers_are_jumpers"}, "removed schematic library symbol jumper pin-number flags")
+        _queue_child_removal(child_removals, target < 20250227, {"symbol"}, {"power"}, "removed schematic library symbol power class flags")
         if target < 20241004:
             _warn_if_changed(warnings, downgrade_bool_lists_to_atoms(root, {"hide"}), "downgraded schematic boolean hide fields")
             _warn_if_changed(warnings, flatten_child_lists_to_atoms_in_parents(root, {"pin_names", "pin_numbers"}, {"hide"}), "downgraded schematic symbol pin visibility fields")
         _apply_when(warnings, target < 20240108, lambda: downgrade_font_style_lists_to_atoms(root), "downgraded schematic font bold/italic bool fields")
-        _apply_when(warnings, target <= 20250114, lambda: remove_children_from_parents(root, {"font"}, {"face"}), "removed schematic font face fields")
+        _queue_child_removal(child_removals, target <= 20250114, {"font"}, {"face"}, "removed schematic font face fields")
         if target < 20241209:
             _warn_if_changed(warnings, ensure_legacy_property_ids(root), "added legacy schematic property ids")
             _warn_if_changed(warnings, move_property_hide_to_effects(root), "moved schematic property hide flags to effects")
-        _apply_when(warnings, target < 20231120, lambda: remove_children_from_parents(root, {"symbol", "sheet"}, {"fields_autoplaced"}), "removed schematic symbol/sheet fields_autoplaced fields")
-        _apply_when(warnings, target < 20251028, lambda: remove_children_from_parents(root, {"property"}, {"show_name", "do_not_autoplace"}), "removed schematic property formatting fields")
+        _queue_child_removal(child_removals, target < 20231120, {"symbol", "sheet"}, {"fields_autoplaced"}, "removed schematic symbol/sheet fields_autoplaced fields")
+        _queue_child_removal(child_removals, target < 20251028, {"property"}, {"show_name", "do_not_autoplace"}, "removed schematic property formatting fields")
         _apply_when(warnings, target < 20260306, lambda: remove_direct_children_by_head(root, "group"), "removed schematic group nodes")
+        apply_child_removal_rules(root, warnings, child_removals)
 
     elif doc.kind in {"board", "footprint"}:
+        child_removals = []
+        child_value_rewrites: list[ChildValueRewriteRule] = []
+        descendant_removals: list[DescendantRemovalRule] = []
+        containing_child_removals: list[ContainingChildRemovalRule] = []
         warnings.extend(remove_introduced(root, target, BOARD_RULES))
-        _apply_when(warnings, target < 20260410, lambda: remove_nodes_containing_child(root, "model", "type"), "removed typed/extruded 3D model blocks")
+        if target < 20260410:
+            containing_child_removals.append(("model", "type", "removed typed/extruded 3D model blocks"))
+        _queue_descendant_removal(descendant_removals, target < 20250228, {"covering", "plugging", "filling", "capping"}, "removed IPC-4761 via protection fields")
+        _queue_descendant_removal(descendant_removals, target < 20231212, {"unlocked"}, "removed PCB text keep-upright unlock fields")
+        apply_structural_removal_rules(root, warnings, descendant_removals, containing_child_removals)
         _apply_when(warnings, target < 20260513, lambda: replace_atom_values_in_parents(root, {"mode"}, "thieving", "polygon"), "downgraded copper thieving fill modes to polygon fill")
-        _apply_when(warnings, target >= 20220225, lambda: remove_children_from_parents(root, {"footprint", "module"}, {"tedit"}), "removed obsolete footprint tedit fields")
-        _apply_when(warnings, target >= 20200628, lambda: remove_children_from_parents(root, {"setup"}, {"visible_elements"}), "removed obsolete board visible_elements settings")
+        _queue_child_removal(child_removals, target >= 20220225, {"footprint", "module"}, {"tedit"}, "removed obsolete footprint tedit fields")
+        _queue_child_removal(child_removals, target >= 20200628, {"setup"}, {"visible_elements"}, "removed obsolete board visible_elements settings")
         _apply_when(warnings, target < 20240703, lambda: downgrade_user_layer_types(root), "removed user-layer type qualifiers")
         if target < 20241010:
-            _warn_if_changed(warnings, remove_children_from_parents(root, {"gr_line", "gr_arc", "gr_circle", "gr_rect", "gr_poly", "fp_line", "fp_arc", "fp_circle", "fp_rect", "fp_poly"}, {"solder_mask_margin"}), "removed graphic solder_mask_margin fields")
+            _queue_child_removal(child_removals, True, {"gr_line", "gr_arc", "gr_circle", "gr_rect", "gr_poly", "fp_line", "fp_arc", "fp_circle", "fp_rect", "fp_poly"}, {"solder_mask_margin"}, "removed graphic solder_mask_margin fields")
         if target < 20241030:
-            _warn_if_changed(warnings, downgrade_bool_lists_to_atoms(root, {"suppress_zeroes", "keep_text_aligned"}), "downgraded dimension boolean fields to legacy atom syntax")
-            _warn_if_changed(warnings, remove_children_from_parents(root, {"style"}, {"arrow_direction"}), "removed dimension arrow direction fields")
-        _apply_when(warnings, target < 20241009, lambda: remove_children_from_parents(root, {"zone"}, {"placement"}), "removed zone placement fields")
-        _apply_when(warnings, target < 20241007, lambda: remove_children_from_parents(root, {"segment", "arc"}, {"solder_mask_margin", "solder_mask_layer"}), "removed track soldermask layer/margin fields")
-        _apply_when(warnings, target < 20240617, lambda: remove_children_from_parents(root, {"table_cell"}, {"angle"}), "removed PCB table cell angle fields")
+            _queue_child_removal(child_removals, True, {"style"}, {"arrow_direction"}, "removed dimension arrow direction fields")
+        _queue_child_removal(child_removals, target < 20241009, {"zone"}, {"placement"}, "removed zone placement fields")
+        _queue_child_removal(child_removals, target < 20241007, {"segment", "arc"}, {"solder_mask_margin", "solder_mask_layer"}, "removed track soldermask layer/margin fields")
+        _queue_child_removal(child_removals, target < 20240617, {"table_cell"}, {"angle"}, "removed PCB table cell angle fields")
         if target < 20250228:
             _warn_if_changed(warnings, downgrade_tenting_to_legacy_atoms(root), "downgraded tenting front/back bool lists to legacy atom syntax")
-            _warn_if_changed(warnings, remove_descendants_by_head(root, {"covering", "plugging", "filling", "capping"}), "removed IPC-4761 via protection fields")
         if target < 20231212:
             _warn_if_changed(warnings, downgrade_boolean_presence_nodes(root, {"locked", "hide"}), "downgraded board/footprint boolean locked/hide fields")
-            _warn_if_changed(warnings, remove_descendants_by_head(root, {"unlocked"}), "removed PCB text keep-upright unlock fields")
-            _warn_if_changed(warnings, remove_children_from_parents(root, {"model"}, {"hide"}), "removed legacy-incompatible 3D model hide fields")
+            _queue_child_removal(child_removals, True, {"model"}, {"hide"}, "removed legacy-incompatible 3D model hide fields")
         _apply_when(warnings, target < 20231014, lambda: remove_direct_children_by_head(root, "generator_version"), "removed board/footprint generator_version fields")
         if target < 20230924:
             _warn_if_changed(warnings, downgrade_pcbplotparams_bools(root), "downgraded pcbplotparams boolean values")
             _warn_if_changed(warnings, downgrade_shape_fill_no_to_none(root), "downgraded PCB shape fill no values to none")
         if target < 20230730:
-            _warn_if_changed(warnings, remove_children_from_parents(root, {"gr_line", "gr_arc", "gr_circle", "gr_rect", "gr_poly", "gr_curve", "fp_line", "fp_arc", "fp_circle", "fp_rect", "fp_poly", "fp_curve"}, {"net"}), "removed PCB graphic shape net connectivity fields")
+            _queue_child_removal(child_removals, True, {"gr_line", "gr_arc", "gr_circle", "gr_rect", "gr_poly", "gr_curve", "fp_line", "fp_arc", "fp_circle", "fp_rect", "fp_poly", "fp_curve"}, {"net"}, "removed PCB graphic shape net connectivity fields")
         if target < 20240108:
-            _warn_if_changed(warnings, remove_children_from_parents(root, {"group"}, {"locked"}), "removed group locked fields")
-            _warn_if_changed(warnings, downgrade_font_style_lists_to_atoms(root), "downgraded PCB font bold/italic bool fields")
+            _queue_child_removal(child_removals, True, {"group"}, {"locked"}, "removed group locked fields")
+            child_value_rewrites.append(("bool-list", {"font"}, {"bold", "italic"}, "downgraded PCB font bold/italic bool fields"))
         _apply_when(warnings, target < 20230620, lambda: downgrade_pcb_footprint_fields(root), "downgraded PCB footprint fields to legacy storage")
         if target < 20231231:
             parents = {"footprint", "module", "pad", "via", "segment", "arc", "zone", "gr_line", "gr_arc", "gr_circle", "gr_rect", "gr_poly", "gr_curve", "gr_text", "fp_line", "fp_arc", "fp_circle", "fp_rect", "fp_poly", "fp_curve", "fp_text"}
             _warn_if_changed(warnings, rename_child_head_in_parents(root, parents, "uuid", "tstamp"), "renamed footprint uuid fields back to legacy tstamp")
             _warn_if_changed(warnings, rename_child_head_in_parents(root, {"group", "generated"}, "uuid", "id"), "renamed board group/generated uuid fields back to id")
-        _apply_when(warnings, target < 20250324, lambda: remove_children_from_parents(root, {"footprint"}, {"duplicate_pad_numbers_are_jumpers", "jumper_pad_groups"}), "removed footprint jumper pad fields")
+        _queue_child_removal(child_removals, target < 20250324, {"footprint"}, {"duplicate_pad_numbers_are_jumpers", "jumper_pad_groups"}, "removed footprint jumper pad fields")
         _apply_when(warnings, target <= 20221018, lambda: remove_atoms_from_headed_lists(root, {"attr"}, {"dnp"}), "removed footprint dnp attributes")
-        _apply_when(warnings, target < 20250309, lambda: remove_children_from_parents(root, {"placement"}, {"component_class"}), "removed rule_area component_class placement sources")
+        _queue_child_removal(child_removals, target < 20250309, {"placement"}, {"component_class"}, "removed rule_area component_class placement sources")
         _apply_when(warnings, target < 20250222, lambda: downgrade_shape_hatch_fills(root), "downgraded PCB shape hatch fills")
-        _apply_when(warnings, target < 20250210, lambda: remove_children_from_parents(root, {"gr_text_box", "fp_text_box"}, {"knockout"}), "removed PCB text box knockout fields")
+        _queue_child_removal(child_removals, target < 20250210, {"gr_text_box", "fp_text_box"}, {"knockout"}, "removed PCB text box knockout fields")
         _apply_when(warnings, target < 20250210, lambda: ensure_zone_filled_areas_thickness(root), "tagged cached zone fills as polygon fills")
-        _apply_when(warnings, target <= 20241229, lambda: remove_children_from_parents(root, {"font"}, {"face"}), "removed PCB font face fields")
+        _queue_child_removal(child_removals, target <= 20241229, {"font"}, {"face"}, "removed PCB font face fields")
         if target <= 20221018:
-            _warn_if_changed(warnings, remove_children_from_parents(root, {"pad", "via"}, {"remove_unused_layers"}), "removed pad/via remove_unused_layers fields")
+            child_value_rewrites.append(("presence-bool", None, {"free"}, "downgraded free via fields"))
+        if target <= 20221018:
+            _queue_child_removal(child_removals, True, {"pad", "via"}, {"remove_unused_layers"}, "removed pad/via remove_unused_layers fields")
+        if target < 20241030:
+            child_value_rewrites.insert(0, ("bool-list", None, {"suppress_zeroes", "keep_text_aligned"}, "downgraded dimension boolean fields to legacy atom syntax"))
+        apply_child_value_rewrite_rules(root, warnings, child_value_rewrites)
+        if target <= 20221018:
             _warn_if_changed(warnings, downgrade_dimensions_to_text(root), "downgraded PCB dimensions to legacy text annotations")
             _warn_if_changed(warnings, remove_descendants_by_head(root, {"locked"}), "removed legacy-incompatible locked fields")
-            _warn_if_changed(warnings, downgrade_boolean_presence_nodes(root, {"free"}), "downgraded free via fields")
-        _apply_when(warnings, target < 20251101, lambda: remove_children_from_parents(root, {"pad", "via"}, {"front_post_machining", "back_post_machining"}), "removed pad/via post-machining fields")
+        _queue_child_removal(child_removals, target < 20251101, {"pad", "via"}, {"front_post_machining", "back_post_machining"}, "removed pad/via post-machining fields")
+        apply_child_removal_rules(root, warnings, child_removals)
         _apply_when(warnings, target < 20251028, lambda: downgrade_board_net_names_to_codes(root), "added legacy netcodes to board net references")
 
     elif doc.kind == "worksheet" and target < 20220228:

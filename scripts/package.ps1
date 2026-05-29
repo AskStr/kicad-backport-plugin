@@ -29,8 +29,25 @@ foreach ($dir in $rootDirs) {
 
 Get-ChildItem -LiteralPath $PackageRoot -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force
-Get-ChildItem -LiteralPath $PackageRoot -Recurse -File -Include "*.pyc", "*.pyo" -ErrorAction SilentlyContinue |
+Get-ChildItem -LiteralPath $PackageRoot -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -in @(".pyc", ".pyo") } |
     Remove-Item -Force
+
+$requiredPackageFiles = @(
+    "__init__.py",
+    "plugin.json",
+    "README.md",
+    "requirements.txt",
+    "plugin/plugin.py",
+    "plugin/backport_core.py",
+    "plugin/i18n.py"
+)
+foreach ($file in $requiredPackageFiles) {
+    $path = Join-Path $PackageRoot $file
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Package is missing required file: kicad-backport/$file"
+    }
+}
 
 Compress-Archive -LiteralPath $PackageRoot -DestinationPath $ArchivePath -Force
 
@@ -38,14 +55,21 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
 try {
     $hasPackageRoot = $false
+    $archiveEntries = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($entry in $zip.Entries) {
+        [void]$archiveEntries.Add($entry.FullName)
         if ($entry.FullName -like 'kicad-backport/*') {
             $hasPackageRoot = $true
-            break
         }
     }
     if (-not $hasPackageRoot) {
         throw "Archive does not contain the kicad-backport directory."
+    }
+    foreach ($file in $requiredPackageFiles) {
+        $entryName = "kicad-backport/$file"
+        if (-not $archiveEntries.Contains($entryName)) {
+            throw "Archive is missing required file: $entryName"
+        }
     }
 }
 finally {

@@ -2,15 +2,26 @@
 
 Copyright (C) askstar
 
-Versione 0.2.1
+Versione 0.3.0
 
 KiCad Backport crea una copia di un progetto o file KiCad che puo essere aperta
 con una versione precedente di KiCad. Il progetto originale non viene
 sovrascritto.
 
-La versione 0.2.1 supporta i progetti salvati dalle versioni nightly attuali di
+La versione 0.3.0 supporta i progetti salvati dalle versioni nightly attuali di
 KiCad 10.99 e puo scrivere copie compatibili con KiCad 10, KiCad 9, KiCad 8 o
 KiCad 7.
+
+## Novita della versione 0.3.0
+
+- Le prestazioni di conversione sono state migliorate in modo significativo,
+  circa 3x piu veloci nei test con progetti di grandi dimensioni.
+- Parsing, formattazione e attraversamento dell'albero S-expression sono
+  ottimizzati per file di grandi dimensioni.
+- La gestione delle regole di downgrade e raggruppata per ridurre gli
+  attraversamenti completi ripetuti dell'albero.
+- Sono migliorati la compatibilita con Python di KiCad 7 e i controlli di
+  completezza dei pacchetti.
 
 ## Lingua
 
@@ -52,7 +63,7 @@ Destinazioni di output supportate:
 ## Installazione
 
 1. Chiudere KiCad.
-2. Copiare l'intera cartella `kicad_backport` nella cartella utente `plugins`
+2. Copiare l'intera cartella `kicad-backport` nella cartella utente `plugins`
    di KiCad.
 3. Per KiCad 10.99 e i plugin API piu recenti, usare la cartella utente
    versionata, per esempio `C:\Users\<utente>\Documents\KiCad\10.99\plugins`.

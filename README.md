@@ -2,15 +2,24 @@
 
 Copyright (C) 问星/askstar
 
-Version 0.2.1
+Version 0.3.0
 
 KiCad Backport helps you create a copy of a KiCad project or file that
 can be opened by an older KiCad version.
 
 The original project is not overwritten.
 
-Version 0.2.1 supports projects saved by current KiCad 10.99 nightly builds
+Version 0.3.0 supports projects saved by current KiCad 10.99 nightly builds
 and can write KiCad 10, KiCad 9, KiCad 8, or KiCad 7 compatible copies.
+
+## Version 0.3.0 Highlights
+
+- Conversion performance is significantly improved, about 3x faster in large
+  project tests.
+- S-expression parsing, formatting, and tree traversal are optimized for large
+  files.
+- Downgrade rule handling is batched to reduce repeated full-tree traversals.
+- KiCad 7 Python compatibility and package completeness checks are improved.
 
 The plugin automatically follows your KiCad or system language when possible.
 The current user interface includes English, Simplified Chinese, Traditional
@@ -77,7 +86,7 @@ work.
 ## Install
 
 1. Close KiCad.
-2. Copy the whole `kicad_backport` folder into your KiCad user `plugins`
+2. Copy the whole `kicad-backport` folder into your KiCad user `plugins`
    folder.
 3. For KiCad 10.99 and newer API plugins, use the versioned user plugins
    folder, for example `C:\Users\<you>\Documents\KiCad\10.99\plugins`.

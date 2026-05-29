@@ -2,11 +2,18 @@
 
 版权 (C) 问星
 
-版本 0.2.1
+版本 0.3.0
 
 KiCad Backport 用于创建可由旧版 KiCad 打开的工程或文件副本。原始工程不会被覆盖。
 
-0.2.1 版本支持当前 KiCad 10.99 每夜版保存的工程，并可输出兼容 KiCad 10、KiCad 9、KiCad 8 或 KiCad 7 的副本。
+0.3.0 版本支持当前 KiCad 10.99 每夜版保存的工程，并可输出兼容 KiCad 10、KiCad 9、KiCad 8 或 KiCad 7 的副本。
+
+## 0.3.0 版本亮点
+
+- 大幅优化转换执行效率，在大型工程测试中约提升 3 倍。
+- 优化 S 表达式解析、格式化和树遍历逻辑，更好地处理大文件。
+- 合并降级规则处理，减少重复全量遍历。
+- 改进 KiCad 7 Python 兼容性，并增加打包完整性检查。
 
 ## 语言
 
@@ -44,7 +51,7 @@ KiCad Backport 的转换核心已全部用 Python 实现，并在插件进程内
 ## 安装
 
 1. 关闭 KiCad。
-2. 将整个 `kicad_backport` 文件夹复制到 KiCad 用户 `plugins` 文件夹。
+2. 将整个 `kicad-backport` 文件夹复制到 KiCad 用户 `plugins` 文件夹。
 3. 对 KiCad 10.99 及更新的 API 插件，请使用带版本号的用户插件目录，例如 `C:\Users\<你>\Documents\KiCad\10.99\plugins`。
 4. 在 KiCad 10.99 中，必须在偏好设置中启用 KiCad API/API server，否则 KiCad 不会识别或加载 API 插件。
 5. 对旧版 KiCad，也将同一文件夹复制到 `scripting/plugins`。

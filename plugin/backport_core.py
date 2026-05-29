@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 ESCAPES = {"n": "\n", "t": "\t", '"': '"', "\\": "\\"}
 
 

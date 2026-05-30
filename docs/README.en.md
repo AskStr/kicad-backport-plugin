@@ -2,15 +2,15 @@
 
 Copyright (C) askstar
 
-Version 0.3.0
+Version 0.3.1
 
 KiCad Backport creates a copy of a KiCad project or file that can be opened by
 an older KiCad version. The original project is not overwritten.
 
-Version 0.3.0 supports projects saved by current KiCad 10.99 nightly builds and
+Version 0.3.1 supports projects saved by current KiCad 10.99 nightly builds and
 can write KiCad 10, KiCad 9, KiCad 8, or KiCad 7 compatible copies.
 
-## Version 0.3.0 Highlights
+## Version 0.3.1 Highlights
 
 - Conversion performance is significantly improved, about 3x faster in large
   project tests.

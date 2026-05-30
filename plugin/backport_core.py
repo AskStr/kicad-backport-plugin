@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 ESCAPES = {"n": "\n", "t": "\t", '"': '"', "\\": "\\"}
 
 
@@ -320,6 +321,76 @@ def _bool_value(value: str, default: bool = True) -> bool:
     if lower in {"no", "false", "0"}:
         return False
     return default
+
+
+def _to_float(value: str) -> float | None:
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _format_float(value: float) -> str:
+    if abs(value) < 0.0000000005:
+        value = 0.0
+    text = f"{value:.9f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _footprint_transform(node: Node) -> tuple[float, float, float] | None:
+    at = node.child_list("at")
+    if not at:
+        return None
+    x = _to_float(at.atom_at(1))
+    y = _to_float(at.atom_at(2))
+    angle = _to_float(at.atom_at(3)) if at.atom_at(3) else 0.0
+    if x is None or y is None or angle is None:
+        return None
+    return x, y, angle
+
+
+def _normalize_angle(angle: float) -> float:
+    angle = math.fmod(angle, 360.0)
+    if angle <= -180.0:
+        angle += 360.0
+    elif angle > 180.0:
+        angle -= 360.0
+    if abs(angle) < 0.0000000005:
+        angle = 0.0
+    return angle
+
+
+def _point_to_footprint_local(x: float, y: float, transform: tuple[float, float, float]) -> tuple[float, float]:
+    origin_x, origin_y, footprint_angle = transform
+    radians = math.radians(-footprint_angle)
+    dx = x - origin_x
+    dy = y - origin_y
+    return (
+        dx * math.cos(radians) - dy * math.sin(radians),
+        dx * math.sin(radians) + dy * math.cos(radians),
+    )
+
+
+def _transform_dimension_text_to_footprint_local(text: Node, transform: tuple[float, float, float]) -> None:
+    at = text.child_list("at")
+    if not at:
+        return
+    x = _to_float(at.atom_at(1))
+    y = _to_float(at.atom_at(2))
+    world_angle = _to_float(at.atom_at(3)) if at.atom_at(3) else 0.0
+    if x is None or y is None or world_angle is None:
+        return
+
+    _origin_x, _origin_y, footprint_angle = transform
+    local_x, local_y = _point_to_footprint_local(x, y, transform)
+    local_angle = _normalize_angle(world_angle - footprint_angle)
+
+    at.set_atom_at(1, _format_float(local_x))
+    at.set_atom_at(2, _format_float(local_y))
+    if len(at.children) > 3:
+        at.set_atom_at(3, _format_float(local_angle))
+    elif local_angle:
+        at.children.append(atom(_format_float(local_angle)))
 
 
 def detect_kind(path: Path, top_level: str) -> str:
@@ -997,30 +1068,305 @@ def replace_atom_values_in_parents(root: Node, parents: set[str], old: str, new:
     return changed
 
 
-def downgrade_dimensions_to_text(root: Node) -> int:
-    def convert(node: Node, inside_footprint: bool) -> int:
-        inside = inside_footprint or node.head() in {"footprint", "module"}
+def _child_float(node: Node, head: str, default: float) -> float:
+    child = node.child_list(head)
+    if not child:
+        return default
+    value = _to_float(child.atom_at(1))
+    return default if value is None else value
+
+
+def _dimension_points(node: Node) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    pts = node.child_list("pts")
+    if not pts:
+        return None
+    points: list[tuple[float, float]] = []
+    for child in pts.children:
+        if child.atom is None and child.head() == "xy":
+            x = _to_float(child.atom_at(1))
+            y = _to_float(child.atom_at(2))
+            if x is not None and y is not None:
+                points.append((x, y))
+    if len(points) < 2:
+        return None
+    return points[0], points[1]
+
+
+def _xy_node(point: tuple[float, float]) -> Node:
+    return sexpr_list(atom("xy"), atom(_format_float(point[0])), atom(_format_float(point[1])))
+
+
+def _pts_node(start: tuple[float, float], end: tuple[float, float]) -> Node:
+    return sexpr_list(atom("pts"), _xy_node(start), _xy_node(end))
+
+
+def _legacy_dimension_line(head: str, start: tuple[float, float], end: tuple[float, float]) -> Node:
+    return sexpr_list(atom(head), _pts_node(start, end))
+
+
+def _transform_point_if_needed(point: tuple[float, float], transform: tuple[float, float, float] | None) -> tuple[float, float]:
+    if not transform:
+        return point
+    return _point_to_footprint_local(point[0], point[1], transform)
+
+
+def _clone_atom_node(node: Node) -> Node:
+    return atom(node.atom or "", node.quoted)
+
+
+def _copy_dimension_layer(source: Node, text: Node | None) -> Node:
+    layer = source.child_list("layer") or (text.child_list("layer") if text else None)
+    if layer and len(layer.children) > 1 and layer.children[1].atom is not None:
+        return sexpr_list(atom("layer"), _clone_atom_node(layer.children[1]))
+    return sexpr_list(atom("layer"), atom("Dwgs.User", True))
+
+
+def _copy_dimension_tstamp(source: Node, text: Node | None) -> Node | None:
+    tstamp = source.child_list("tstamp") or source.child_list("uuid")
+    if not tstamp and text:
+        tstamp = text.child_list("tstamp") or text.child_list("uuid")
+    if tstamp and len(tstamp.children) > 1 and tstamp.children[1].atom is not None:
+        return sexpr_list(atom("tstamp"), _clone_atom_node(tstamp.children[1]))
+    return None
+
+
+def _legacy_dimension_from_modern(node: Node, transform: tuple[float, float, float] | None) -> Node | None:
+    points = _dimension_points(node)
+    source_text = node.child_list("gr_text")
+    if not points or not source_text:
+        return None
+
+    p1, p2 = points
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        return None
+
+    unit = (dx / length, dy / length)
+    perpendicular = (-unit[1], unit[0])
+    height = _child_float(node, "height", 0.0)
+
+    style = node.child_list("style") or sexpr_list(atom("style"))
+    thickness = _child_float(style, "thickness", 0.15)
+    arrow_length = _child_float(style, "arrow_length", 1.27)
+    extension_height = _child_float(style, "extension_height", 0.58642)
+    extension_offset = _child_float(style, "extension_offset", 0.5)
+    height_sign = -1.0 if height < 0 else 1.0
+
+    def offset(point: tuple[float, float], distance: float) -> tuple[float, float]:
+        return (point[0] + perpendicular[0] * distance, point[1] + perpendicular[1] * distance)
+
+    feature1_start = p1
+    feature1_end = offset(p1, height + extension_height * height_sign)
+    feature2_start = p2
+    feature2_end = offset(p2, height + extension_height * height_sign)
+    crossbar1 = offset(p1, height)
+    crossbar2 = offset(p2, height)
+
+    arrow_angle = math.radians(27.5)
+    arrow_along = arrow_length * math.cos(arrow_angle)
+    arrow_side = arrow_length * math.sin(arrow_angle)
+
+    def arrow_points(origin: tuple[float, float], direction: tuple[float, float], side: float) -> tuple[float, float]:
+        return (
+            origin[0] + direction[0] * arrow_along + perpendicular[0] * side,
+            origin[1] + direction[1] * arrow_along + perpendicular[1] * side,
+        )
+
+    arrow1a = arrow_points(crossbar1, unit, arrow_side)
+    arrow1b = arrow_points(crossbar1, unit, -arrow_side)
+    arrow2a = arrow_points(crossbar2, (-unit[0], -unit[1]), arrow_side)
+    arrow2b = arrow_points(crossbar2, (-unit[0], -unit[1]), -arrow_side)
+
+    text = source_text
+    if transform:
+        _transform_dimension_text_to_footprint_local(text, transform)
+
+    legacy = sexpr_list(atom("dimension"))
+    legacy.children.append(sexpr_list(atom("width"), atom(_format_float(thickness))))
+    legacy.children.append(_copy_dimension_layer(node, text))
+    tstamp = _copy_dimension_tstamp(node, text)
+    if tstamp:
+        legacy.children.append(tstamp)
+    legacy.children.append(text)
+    legacy.children.append(_legacy_dimension_line("feature1", _transform_point_if_needed(feature1_start, transform), _transform_point_if_needed(feature1_end, transform)))
+    legacy.children.append(_legacy_dimension_line("feature2", _transform_point_if_needed(feature2_start, transform), _transform_point_if_needed(feature2_end, transform)))
+    legacy.children.append(_legacy_dimension_line("crossbar", _transform_point_if_needed(crossbar2, transform), _transform_point_if_needed(crossbar1, transform)))
+    legacy.children.append(_legacy_dimension_line("arrow1a", _transform_point_if_needed(crossbar1, transform), _transform_point_if_needed(arrow1a, transform)))
+    legacy.children.append(_legacy_dimension_line("arrow1b", _transform_point_if_needed(crossbar1, transform), _transform_point_if_needed(arrow1b, transform)))
+    legacy.children.append(_legacy_dimension_line("arrow2a", _transform_point_if_needed(crossbar2, transform), _transform_point_if_needed(arrow2a, transform)))
+    legacy.children.append(_legacy_dimension_line("arrow2b", _transform_point_if_needed(crossbar2, transform), _transform_point_if_needed(arrow2b, transform)))
+    return legacy
+
+
+def _graphic_line(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    layer: Node,
+    width: float,
+) -> Node:
+    return sexpr_list(
+        atom("gr_line"),
+        sexpr_list(atom("start"), atom(_format_float(start[0])), atom(_format_float(start[1]))),
+        sexpr_list(atom("end"), atom(_format_float(end[0])), atom(_format_float(end[1]))),
+        sexpr_list(atom("stroke"), sexpr_list(atom("width"), atom(_format_float(width))), sexpr_list(atom("type"), atom("default"))),
+        layer,
+    )
+
+
+def _dimension_graphics_from_modern(node: Node) -> list[Node]:
+    points = _dimension_points(node)
+    source_text = node.child_list("gr_text")
+    if not points or not source_text:
+        return []
+
+    p1, p2 = points
+    dim_type = node.child_list("type").atom_at(1) if node.child_list("type") else "aligned"
+    style = node.child_list("style") or sexpr_list(atom("style"))
+    thickness = _child_float(style, "thickness", 0.15)
+    arrow_length = _child_float(style, "arrow_length", 1.27)
+    height = _child_float(node, "height", 0.0)
+    layer = _copy_dimension_layer(node, source_text)
+
+    def line(start: tuple[float, float], end: tuple[float, float]) -> Node:
+        return _graphic_line(start, end, _copy_dimension_layer(node, source_text), thickness)
+
+    def arrow_lines(origin: tuple[float, float], direction: tuple[float, float], perpendicular: tuple[float, float]) -> list[Node]:
+        arrow_angle = math.radians(27.5)
+        arrow_along = arrow_length * math.cos(arrow_angle)
+        arrow_side = arrow_length * math.sin(arrow_angle)
+
+        def endpoint(side: float) -> tuple[float, float]:
+            return (
+                origin[0] + direction[0] * arrow_along + perpendicular[0] * side,
+                origin[1] + direction[1] * arrow_along + perpendicular[1] * side,
+            )
+
+        return [line(origin, endpoint(arrow_side)), line(origin, endpoint(-arrow_side))]
+
+    if dim_type == "orthogonal":
+        orientation = _to_int(node.child_list("orientation").atom_at(1), 0) if node.child_list("orientation") else 0
+        extension_height = _child_float(style, "extension_height", 0.58642)
+        height_sign = -1.0 if height < 0 else 1.0
+
+        if orientation == 1:
+            crossbar1 = (p1[0] + height, p1[1])
+            crossbar2 = (p1[0] + height, p2[1])
+            feature1_end = (p1[0] + height + extension_height * height_sign, p1[1])
+            feature2_end = (p1[0] + height + extension_height * height_sign, p2[1])
+            direction1 = (0.0, -1.0 if p2[1] < p1[1] else 1.0)
+            direction2 = (-direction1[0], -direction1[1])
+            perpendicular = (1.0, 0.0)
+        else:
+            crossbar1 = (p1[0], p1[1] + height)
+            crossbar2 = (p2[0], p1[1] + height)
+            feature1_end = (p1[0], p1[1] + height + extension_height * height_sign)
+            feature2_end = (p2[0], p1[1] + height + extension_height * height_sign)
+            direction1 = (1.0 if p2[0] > p1[0] else -1.0, 0.0)
+            direction2 = (-direction1[0], -direction1[1])
+            perpendicular = (0.0, 1.0)
+
+        return [
+            source_text,
+            line(p1, feature1_end),
+            line(p2, feature2_end),
+            line(crossbar1, crossbar2),
+            *arrow_lines(crossbar1, direction1, perpendicular),
+            *arrow_lines(crossbar2, direction2, perpendicular),
+        ]
+
+    if dim_type in {"radial", "leader"}:
+        return [source_text, _graphic_line(p1, p2, layer, thickness)]
+
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        return [source_text]
+
+    unit = (dx / length, dy / length)
+    perpendicular = (-unit[1], unit[0])
+    extension_height = _child_float(style, "extension_height", 0.58642)
+
+    def offset(point: tuple[float, float], distance: float) -> tuple[float, float]:
+        return (point[0] + perpendicular[0] * distance, point[1] + perpendicular[1] * distance)
+
+    height_sign = -1.0 if height < 0 else 1.0
+    feature1_end = offset(p1, height + extension_height * height_sign)
+    feature2_end = offset(p2, height + extension_height * height_sign)
+    crossbar1 = offset(p1, height)
+    crossbar2 = offset(p2, height)
+
+    return [
+        source_text,
+        _graphic_line(p1, feature1_end, _copy_dimension_layer(node, source_text), thickness),
+        _graphic_line(p2, feature2_end, _copy_dimension_layer(node, source_text), thickness),
+        _graphic_line(crossbar1, crossbar2, _copy_dimension_layer(node, source_text), thickness),
+        *arrow_lines(crossbar1, unit, perpendicular),
+        *arrow_lines(crossbar2, (-unit[0], -unit[1]), perpendicular),
+    ]
+
+
+def downgrade_dimensions_to_graphics(root: Node) -> int:
+    graphics: list[Node] = []
+
+    def convert(node: Node) -> int:
         changed = 0
         kept: list[Node] = []
         for child in node.children:
             if child.atom is None and child.head() == "dimension":
-                source = child.child_list("gr_text")
-                if source:
-                    text = sexpr_list(atom("fp_text" if inside else "gr_text"))
-                    if inside:
-                        text.children.extend([atom("user"), atom(source.atom_at(1), True)])
-                    else:
-                        text.children.append(atom(source.atom_at(1), True))
-                    text.children.extend(source.children[2:])
-                    kept.append(text)
+                converted = _dimension_graphics_from_modern(child)
+                if converted:
+                    graphics.extend(converted)
                 changed += 1
             else:
                 if child.atom is None:
-                    changed += convert(child, inside)
+                    changed += convert(child)
                 kept.append(child)
         node.children = kept
         return changed
-    return convert(root, False)
+
+    changed = convert(root)
+    if graphics and root.head() == "kicad_pcb":
+        root.children.extend(graphics)
+    return changed
+
+
+def downgrade_dimensions_to_legacy(root: Node) -> int:
+    lifted_dimensions: list[Node] = []
+
+    def convert(node: Node, inside_footprint: bool, footprint_transform: tuple[float, float, float] | None) -> int:
+        inside = inside_footprint or node.head() in {"footprint", "module"}
+        current_transform = footprint_transform
+        if node.head() in {"footprint", "module"}:
+            current_transform = _footprint_transform(node)
+        changed = 0
+        kept: list[Node] = []
+        for child in node.children:
+            if child.atom is None and child.head() == "dimension":
+                # KiCad 7 renders legacy dimensions most reliably as board items.  Source footprint
+                # dimensions in saved boards already use board coordinates, so lift them to the PCB root.
+                legacy = _legacy_dimension_from_modern(child, None)
+                if legacy:
+                    if inside:
+                        lifted_dimensions.append(legacy)
+                    else:
+                        kept.append(legacy)
+                    changed += 1
+                else:
+                    changed += 1
+            else:
+                if child.atom is None:
+                    changed += convert(child, inside, current_transform)
+                kept.append(child)
+        node.children = kept
+        return changed
+
+    changed = convert(root, False, None)
+    if lifted_dimensions and root.head() == "kicad_pcb":
+        root.children.extend(lifted_dimensions)
+    return changed
 
 
 def downgrade_board_net_names_to_codes(root: Node) -> int:
@@ -1228,6 +1574,20 @@ def apply_downgrade_rules(doc: Document, target: int) -> list[str]:
             _queue_child_removal(child_removals, True, {"group"}, {"locked"}, "removed group locked fields")
             child_value_rewrites.append(("bool-list", {"font"}, {"bold", "italic"}, "downgraded PCB font bold/italic bool fields"))
         _apply_when(warnings, target < 20230620, lambda: downgrade_pcb_footprint_fields(root), "downgraded PCB footprint fields to legacy storage")
+        if target < 20240225:
+            _warn_if_changed(
+                warnings,
+                rename_child_head_in_parents(root, {"footprint", "module", "pad"}, "solder_paste_margin_ratio", "solder_paste_ratio"),
+                "renamed solder_paste_margin_ratio fields to legacy solder_paste_ratio",
+            )
+        if target < 20240108:
+            _queue_child_removal(
+                child_removals,
+                True,
+                {"via"},
+                {"remove_unused_layers", "keep_end_layers", "start_end_only", "zone_layer_connections"},
+                "removed legacy via layer-connection fields",
+            )
         if target < 20231231:
             parents = {"footprint", "module", "pad", "via", "segment", "arc", "zone", "gr_line", "gr_arc", "gr_circle", "gr_rect", "gr_poly", "gr_curve", "gr_text", "fp_line", "fp_arc", "fp_circle", "fp_rect", "fp_poly", "fp_curve", "fp_text"}
             _warn_if_changed(warnings, rename_child_head_in_parents(root, parents, "uuid", "tstamp"), "renamed footprint uuid fields back to legacy tstamp")
@@ -1247,7 +1607,7 @@ def apply_downgrade_rules(doc: Document, target: int) -> list[str]:
             child_value_rewrites.insert(0, ("bool-list", None, {"suppress_zeroes", "keep_text_aligned"}, "downgraded dimension boolean fields to legacy atom syntax"))
         apply_child_value_rewrite_rules(root, warnings, child_value_rewrites)
         if target <= 20221018:
-            _warn_if_changed(warnings, downgrade_dimensions_to_text(root), "downgraded PCB dimensions to legacy text annotations")
+            _warn_if_changed(warnings, downgrade_dimensions_to_graphics(root), "downgraded PCB dimensions to legacy graphic annotations")
             _warn_if_changed(warnings, remove_descendants_by_head(root, {"locked"}), "removed legacy-incompatible locked fields")
         _queue_child_removal(child_removals, target < 20251101, {"pad", "via"}, {"front_post_machining", "back_post_machining"}, "removed pad/via post-machining fields")
         apply_child_removal_rules(root, warnings, child_removals)

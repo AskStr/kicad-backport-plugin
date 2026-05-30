@@ -2,7 +2,7 @@
   "$schema": "https://go.kicad.org/api/schemas/v1",
   "identifier": "com.askstar.kicad.backport",
   "name": "KiCad Backport",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Create a compatibility copy of a KiCad file or project for older KiCad releases.",
   "copyright": "问星/askstar",
   "runtime": {

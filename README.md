@@ -2,28 +2,17 @@
 
 Copyright (C) 问星/askstar
 
-Version 0.3.1
+Version 0.4.0
 
-KiCad Backport helps you create a copy of a KiCad project or file that
-can be opened by an older KiCad version.
+KiCad Backport creates a compatibility copy of a KiCad project or file for an
+older KiCad target version. It is designed for practical downgrade and upgrade
+workflows across modern S-expression files and KiCad 5-era legacy files. The
+original project is not overwritten.
 
-The original project is not overwritten.
-
-Version 0.3.1 supports projects saved by current KiCad 10.99 nightly builds
-and can write KiCad 10, KiCad 9, KiCad 8, or KiCad 7 compatible copies.
-
-## Version 0.3.1 Highlights
-
-- Conversion performance is significantly improved, about 3x faster in large
-  project tests.
-- S-expression parsing, formatting, and tree traversal are optimized for large
-  files.
-- Downgrade rule handling is batched to reduce repeated full-tree traversals.
-- KiCad 7 Python compatibility and package completeness checks are improved.
-
-The plugin automatically follows your KiCad or system language when possible.
-The current user interface includes English, Simplified Chinese, Traditional
-Chinese, French, German, and Italian.
+The converter core is implemented in pure Python and runs in-process for normal
+plugin use. KiCad 5-era Python launches the same GUI through an external Python
+3 interpreter so the conversion engine can still be used from old KiCad
+installations.
 
 ## Translations
 
@@ -34,11 +23,60 @@ Chinese, French, German, and Italian.
 - [Deutsch](docs/README.de.md)
 - [Italiano](docs/README.it.md)
 
+## Current Capabilities
+
+- Converts whole KiCad project folders or individual KiCad files.
+- Supports board, schematic, symbol-library, footprint, worksheet,
+  design-rule, project, and legacy project/library/schematic files where the
+  target format defines a conversion path.
+- Converts modern `.kicad_sch`, `.kicad_sym`, and `.kicad_pro` files to KiCad
+  5-era `.sch`, `.lib` / `.dcm`, and `.pro` files for V5 targets.
+- Upgrades legacy `.sch`, `.lib`, `.dcm`, and `.pro` files back to modern
+  KiCad S-expression or JSON project files for newer targets.
+- Preserves project-local symbol libraries and normalizes library tables for
+  old targets.
+- Rebuilds KiCad 6+ schematic hierarchy and symbol instance data for modern
+  project outputs when needed.
+- Writes V6/V7/V8 project-local `.kicad_prl` files with compatible visible
+  items and layers for board outputs.
+- Uses compatibility rewrites for newer PCB, footprint, schematic, symbol,
+  worksheet, and design-rule features that are not accepted by older KiCad
+  versions.
+- Writes a JSON conversion report when requested by CLI or when launched from
+  the GUI.
+
+Some modern KiCad features are inherently lossy when converted to much older
+formats. The converter removes, rewrites, or approximates unsupported constructs
+and reports warnings for those changes.
+
+## Supported Targets
+
+The GUI target list is:
+
+- KiCad 10
+- KiCad 9
+- KiCad 8
+- KiCad 7
+- KiCad 6
+- KiCad 5.1
+- KiCad 5.0
+- KiCad 4
+
+The conversion core also accepts raw numeric format targets where supported,
+including development board/footprint formats such as `20260603` and
+`20260521`.
+
+Supported input families include:
+
+- Current KiCad 10.99 nightly files
+- KiCad 10, 9, 8, 7, 6, and 5 files
+- KiCad legacy `.sch`, `.lib`, `.dcm`, and `.pro` files
+
 ## Language
 
-KiCad Backport automatically uses the language selected in KiCad when it can
-read it. If KiCad has no saved language setting, it uses the operating system
-language.
+The plugin follows the language selected in KiCad when possible. It also checks
+KiCad 5-style configuration files such as `kicad_common`, common KiCad language
+environment variables, and finally the operating-system UI language.
 
 Supported interface languages:
 
@@ -53,35 +91,15 @@ Restart KiCad or reopen the plugin window after changing the KiCad language.
 
 ## Platform Compatibility
 
-KiCad Backport's conversion core is implemented entirely in Python and runs
-in-process inside the plugin. It does not require platform-specific converter
-binaries for normal KiCad use.
-
 Supported systems:
 
 - Windows
 - macOS
 - Linux
 
-## Supported Targets
-
-Supported input versions:
-
-- KiCad 10.99 nightly
-- KiCad 10
-- KiCad 9
-- KiCad 8
-- KiCad 7
-
-Supported output targets:
-
-- KiCad 10
-- KiCad 9
-- KiCad 8
-- KiCad 7
-
-KiCad 6 output is hidden for now and will be enabled after more compatibility
-work.
+The GUI tries wxPython first and falls back to tkinter. In KiCad 5 legacy mode,
+the launcher prefers tkinter first and passes the detected KiCad language and
+configuration path to the external Python 3 process.
 
 ## Install
 
@@ -104,21 +122,44 @@ plugins are not loaded from the installed stock scripting folder such as
 `share/kicad/scripting/plugins`; use the user `plugins` folder instead and make
 sure the KiCad API/API server is enabled.
 
-## Use
+## Use From KiCad
 
-1. Run `Create KiCad Backport` from KiCad.
-2. Choose a KiCad file or project folder as the input.
+1. Run `Create KiCad Backport`.
+2. Choose a project folder or a supported KiCad file.
 3. Choose a different output file or folder.
 4. Select the target KiCad version.
 5. Click `Convert`.
 
-The plugin writes the converted copy to the output path and creates a small
-conversion report next to it.
+The output is written with a target suffix such as `_V7`, `_V5`, or `_V10_99`.
+For V5 targets, modern schematic and symbol-library extensions are changed to
+legacy extensions automatically.
+
+## Use From Command Line
+
+Run the launcher with arguments:
+
+```powershell
+python plugin\plugin.py --input <input-path> --output <output-path> --target-version 5.0 --report report.json
+```
+
+List GUI-supported targets:
+
+```powershell
+python plugin\plugin.py --list-targets
+```
+
+Useful environment variables:
+
+- `KICAD_BACKPORT_PYTHON`: Python 3 executable used by the KiCad 5 launcher.
+- `KICAD_BACKPORT_GUI_BACKEND`: `wx`, `tk`, `auto`, or `legacy`.
+- `KICAD_BACKPORT_LANGUAGE`: explicit UI language override.
+- `KICAD_BACKPORT_KICAD_CONFIG_PATH`: KiCad configuration file or folder used
+  for language detection.
 
 ## Important Notes
 
 - Always choose an output path different from the original project.
-- Some features from newer KiCad versions may be removed or simplified when
-  saving for older KiCad versions.
 - Check the converted copy in the target KiCad version before sharing or
   manufacturing from it.
+- Very old targets cannot preserve every modern feature. Review the conversion
+  report and any warning messages.

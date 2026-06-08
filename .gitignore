@@ -8,6 +8,7 @@
 !*.py
 !__init__.py
 !build.ps1
+!build.sh
 !plugin.json
 !requirements.txt
 !README.md
@@ -25,3 +26,4 @@
 !docs/**
 
 __pycache__
+*.pyc

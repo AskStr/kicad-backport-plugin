@@ -4,7 +4,7 @@ import shutil
 import hashlib
 from pathlib import Path
 from typing import Callable, Iterable, Optional
-VERSION = '0.4.0'
+VERSION = '0.4.1'
 ESCAPES = {'n': '\n', 't': '\t', '"': '"', '\\': '\\'}
 
 class Node:

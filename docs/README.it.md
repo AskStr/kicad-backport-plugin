@@ -2,7 +2,7 @@
 
 Copyright (C) askstar
 
-Versione 0.4.0
+Versione 0.4.1
 
 KiCad Backport crea una copia compatibile di un progetto o file KiCad per una
 versione KiCad precedente. Supporta flussi pratici di downgrade e upgrade tra

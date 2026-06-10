@@ -1,4 +1,6 @@
+# -*- coding: utf-8 -*-
 import locale
+import json
 import os
 import platform
 import re
@@ -19,11 +21,29 @@ except Exception:
         'en': 'en',
         'en_us': 'en',
         '1033': 'en',
+        u'中文': 'zh_CN',
+        u'中文 (中国)': 'zh_CN',
+        u'中文 (简体)': 'zh_CN',
+        u'中文（简体）': 'zh_CN',
+        u'简体': 'zh_CN',
+        u'简体中文': 'zh_CN',
+        u'简体中文 (中国)': 'zh_CN',
+        u'简体中文（中国）': 'zh_CN',
         'chinese simplified': 'zh_CN',
         'simplified chinese': 'zh_CN',
         'chinese (simplified)': 'zh_CN',
         'chinese_simplified': 'zh_CN',
         '2052': 'zh_CN',
+        u'中文 (台灣)': 'zh_TW',
+        u'中文（繁體）': 'zh_TW',
+        u'中文 (繁體)': 'zh_TW',
+        u'繁體': 'zh_TW',
+        u'繁體中文': 'zh_TW',
+        u'繁體中文 (台灣)': 'zh_TW',
+        u'繁體中文（台灣）': 'zh_TW',
+        u'繁体中文': 'zh_TW',
+        u'繁体中文 (台湾)': 'zh_TW',
+        u'繁体中文（台湾）': 'zh_TW',
         'chinese traditional': 'zh_TW',
         'traditional chinese': 'zh_TW',
         'chinese (traditional)': 'zh_TW',
@@ -50,14 +70,14 @@ except Exception:
             'action_description': 'Create a compatibility copy of a KiCad project or file.',
         },
         'zh_CN': {
-            'action_name': 'Create KiCad Backport',
+            'action_name': u'创建 KiCad 兼容副本',
             'action_category': 'KiCad Backport',
-            'action_description': 'Create a compatibility copy of a KiCad project or file.',
+            'action_description': u'创建可供旧版 KiCad 打开的工程或文件副本。',
         },
         'zh_TW': {
-            'action_name': 'Create KiCad Backport',
+            'action_name': u'建立 KiCad 相容副本',
             'action_category': 'KiCad Backport',
-            'action_description': 'Create a compatibility copy of a KiCad project or file.',
+            'action_description': u'建立可供舊版 KiCad 開啟的工程或檔案副本。',
         },
         'fr': {
             'action_name': 'Creer un backport KiCad',
@@ -88,9 +108,9 @@ except Exception:
         lowered = raw.lower().replace('-', '_')
         if lowered in _LANGUAGE_LABELS:
             return _LANGUAGE_LABELS[lowered]
-        if lowered.startswith('zh_cn') or lowered.startswith('zh_sg') or 'simplified' in lowered:
+        if lowered.startswith('zh_hans') or lowered.startswith('zh_cn') or lowered.startswith('zh_sg') or 'simplified' in lowered:
             return 'zh_CN'
-        if lowered.startswith('zh_tw') or lowered.startswith('zh_hk') or lowered.startswith('zh_mo') or 'traditional' in lowered:
+        if lowered.startswith('zh_hant') or lowered.startswith('zh_tw') or lowered.startswith('zh_hk') or lowered.startswith('zh_mo') or 'traditional' in lowered:
             return 'zh_TW'
         if lowered.startswith('zh'):
             return 'zh_CN'
@@ -130,6 +150,66 @@ except Exception:
                 if os.path.exists(path):
                     yield path
 
+    def _runtime_versions():
+        seen = set()
+
+        def emit(value):
+            if not value:
+                return
+            match = re.search('(\\d+)\\.(\\d+)', str(value))
+            if not match:
+                return
+            major_minor = '{0}.{1}'.format(match.group(1), match.group(2))
+            if major_minor not in seen:
+                seen.add(major_minor)
+                yield major_minor
+            major = match.group(1)
+            if major not in seen:
+                seen.add(major)
+                yield major
+
+        if pcbnew is not None:
+            for attr in ('GetMajorMinorVersion', 'GetBuildVersion', 'GetKicadConfigPath'):
+                getter = getattr(pcbnew, attr, None)
+                if callable(getter):
+                    try:
+                        value = getter()
+                    except Exception:
+                        value = ''
+                    for version in emit(value):
+                        yield version
+        for key in ('KICAD_BACKPORT_KICAD_VERSION', 'KICAD_BACKPORT_KICAD_BUILD_VERSION', 'KICAD_BACKPORT_KICAD_CONFIG_PATH'):
+            for version in emit(os.environ.get(key)):
+                yield version
+
+    def _common_config_files_for_base(base, versions):
+        if not base:
+            return
+        if os.path.isfile(base):
+            yield base
+            return
+        for version in versions:
+            for path in _common_config_files(os.path.join(base, version)):
+                yield path
+        for path in _common_config_files(base):
+            yield path
+
+    def _platform_config_bases(home, system, appdata=None, xdg_config_home=None):
+        system = (system or '').lower()
+        if system == 'windows':
+            if appdata:
+                yield os.path.join(appdata, 'kicad')
+                yield os.path.join(appdata, 'KiCad')
+        elif system == 'darwin':
+            yield os.path.join(home, 'Library', 'Preferences', 'kicad')
+            yield os.path.join(home, 'Library', 'Preferences', 'KiCad')
+            yield os.path.join(home, 'Library', 'Application Support', 'kicad')
+            yield os.path.join(home, 'Library', 'Application Support', 'KiCad')
+        else:
+            config_home = xdg_config_home or os.path.join(home, '.config')
+            yield os.path.join(config_home, 'kicad')
+            yield os.path.join(config_home, 'KiCad')
+
     def _kicad_config_files():
         bases = []
         for key in ('KICAD_BACKPORT_KICAD_CONFIG_PATH', 'KICAD_CONFIG_HOME', 'KICAD_CONFIG_PATH'):
@@ -147,24 +227,48 @@ except Exception:
                     value = ''
                 if value:
                     bases.append(value)
-        if platform.system().lower() == 'windows':
-            appdata = os.environ.get('APPDATA')
-            if appdata:
-                bases.append(os.path.join(appdata, 'kicad'))
-                bases.append(os.path.join(appdata, 'KiCad'))
-        else:
-            home = os.path.expanduser('~')
-            config_home = os.environ.get('XDG_CONFIG_HOME') or os.path.join(home, '.config')
-            bases.append(os.path.join(config_home, 'kicad'))
-            bases.append(os.path.join(config_home, 'KiCad'))
+        bases.extend(_platform_config_bases(os.path.expanduser('~'), platform.system(), os.environ.get('APPDATA'), os.environ.get('XDG_CONFIG_HOME')))
         seen = set()
+        versions = list(_runtime_versions())
         for base in bases:
-            for path in _common_config_files(base):
+            for path in _common_config_files_for_base(base, versions):
                 key = path.lower()
                 if key in seen:
                     continue
                 seen.add(key)
                 yield path
+
+    def _find_language_value(value):
+        if isinstance(value, dict):
+            system = value.get('system')
+            if isinstance(system, dict):
+                language = system.get('language')
+                if language:
+                    return str(language)
+            for key, child in value.items():
+                if str(key).lower() == 'language' and child:
+                    return str(child)
+                found = _find_language_value(child)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = _find_language_value(child)
+                if found:
+                    return found
+        return None
+
+    def _config_languages(text):
+        try:
+            payload = json.loads(text)
+            language = _find_language_value(payload)
+            if language:
+                yield language
+                return
+        except Exception:
+            pass
+        for language in _legacy_config_languages(text):
+            yield language
 
     def _legacy_config_languages(text):
         for line in text.splitlines():
@@ -183,7 +287,20 @@ except Exception:
                 value = None
             if value:
                 yield value
-        if platform.system().lower() == 'windows':
+        system = platform.system().lower()
+        if system == 'windows':
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                for getter_name in ('GetUserDefaultLocaleName', 'GetSystemDefaultLocaleName'):
+                    getter = getattr(kernel32, getter_name, None)
+                    if getter is None:
+                        continue
+                    buffer = ctypes.create_unicode_buffer(85)
+                    if getter(buffer, len(buffer)):
+                        yield buffer.value
+            except Exception:
+                pass
             try:
                 import ctypes
                 lang_id = ctypes.windll.kernel32.GetUserDefaultUILanguage()
@@ -199,6 +316,34 @@ except Exception:
                 value = None
             if value:
                 yield value
+        elif system == 'darwin':
+            for value in _macos_locale_values():
+                yield value
+
+    def _macos_locale_values():
+        commands = (
+            ('defaults', 'read', '-g', 'AppleLocale'),
+            ('defaults', 'read', '-g', 'AppleLanguages'),
+        )
+        for command in commands:
+            try:
+                proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                output, _stderr = proc.communicate()
+            except Exception:
+                continue
+            if proc.returncode != 0:
+                continue
+            try:
+                text = output.decode('utf-8', 'replace')
+            except Exception:
+                text = str(output)
+            for value in re.findall(r'"([^"]+)"', text):
+                if value:
+                    yield value
+            for line in text.splitlines():
+                value = line.strip().strip('(),;"')
+                if value and not value.startswith('('):
+                    yield value
 
     def detect_language():
         values = []
@@ -211,7 +356,7 @@ except Exception:
                     text = handle.read().decode('utf-8', 'replace')
             except Exception:
                 continue
-            values.extend(_legacy_config_languages(text))
+            values.extend(_config_languages(text))
         for key in ('KICAD_UI_LANGUAGE', 'KICAD_LANGUAGE', 'LANGUAGE', 'LC_ALL', 'LC_MESSAGES', 'LANG'):
             value = os.environ.get(key)
             if value:

@@ -3,6 +3,7 @@ import locale
 import os
 import platform
 import re
+import subprocess
 import sys
 import ctypes
 from pathlib import Path
@@ -49,12 +50,45 @@ def system_locale_values():
             yield value
     if platform.system().lower() == 'windows':
         try:
+            kernel32 = ctypes.windll.kernel32
+            for getter_name in ('GetUserDefaultLocaleName', 'GetSystemDefaultLocaleName'):
+                getter = getattr(kernel32, getter_name, None)
+                if getter is None:
+                    continue
+                buffer = ctypes.create_unicode_buffer(85)
+                if getter(buffer, len(buffer)):
+                    yield buffer.value
+        except Exception:
+            pass
+        try:
             lang_id = ctypes.windll.kernel32.GetUserDefaultUILanguage()
             value = locale.windows_locale.get(lang_id)
         except Exception:
             value = None
         if value:
             yield value
+    elif platform.system().lower() == 'darwin':
+        for value in macos_locale_values():
+            yield value
+
+def macos_locale_values():
+    commands = (
+        ('defaults', 'read', '-g', 'AppleLocale'),
+        ('defaults', 'read', '-g', 'AppleLanguages'),
+    )
+    for command in commands:
+        try:
+            output = subprocess.check_output(command, stderr=subprocess.DEVNULL, timeout=2)
+            text = output.decode('utf-8', 'replace')
+        except Exception:
+            continue
+        for value in re.findall(r'"([^"]+)"', text):
+            if value:
+                yield value
+        for line in text.splitlines():
+            value = line.strip().strip('(),;"')
+            if value and not value.startswith('('):
+                yield value
 
 def normalize_language(value):
     if not value:
@@ -67,9 +101,9 @@ def normalize_language(value):
         return KICAD_LANGUAGE_LABELS[raw]
     if lowered in KICAD_LANGUAGE_LABELS:
         return KICAD_LANGUAGE_LABELS[lowered]
-    if lowered.startswith('zh_cn') or lowered.startswith('zh_sg') or 'simplified' in lowered:
+    if lowered.startswith('zh_hans') or lowered.startswith('zh_cn') or lowered.startswith('zh_sg') or 'simplified' in lowered:
         return 'zh_CN'
-    if lowered.startswith('zh_tw') or lowered.startswith('zh_hk') or lowered.startswith('zh_mo') or ('traditional' in lowered):
+    if lowered.startswith('zh_hant') or lowered.startswith('zh_tw') or lowered.startswith('zh_hk') or lowered.startswith('zh_mo') or ('traditional' in lowered):
         return 'zh_TW'
     if lowered.startswith('zh'):
         return 'zh_CN'
@@ -140,43 +174,40 @@ def kicad_common_candidates():
             bases.append(Path(value))
     home = Path.home()
     system = platform.system().lower()
-    if system == 'windows':
-        appdata = os.environ.get('APPDATA')
-        if appdata:
-            bases.append(Path(appdata) / 'kicad')
-            bases.append(Path(appdata) / 'KiCad')
-    elif system == 'darwin':
-        bases.append(home / 'Library' / 'Preferences' / 'kicad')
-        bases.append(home / 'Library' / 'Preferences' / 'KiCad')
-        bases.append(home / 'Library' / 'Application Support' / 'kicad')
-        bases.append(home / 'Library' / 'Application Support' / 'KiCad')
-    else:
-        xdg = os.environ.get('XDG_CONFIG_HOME')
-        config_home = Path(xdg) if xdg else home / '.config'
-        bases.append(config_home / 'kicad')
-        bases.append(config_home / 'KiCad')
+    bases.extend(kicad_platform_config_bases(home, system, os.environ.get('APPDATA'), os.environ.get('XDG_CONFIG_HOME')))
     seen = set()
+    versions = list(kicad_runtime_versions())
     for base in kicad_runtime_config_paths():
-        for path in common_files_under(base):
+        for path in common_files_for_base(base, versions):
             key = str(path).lower()
             if key in seen:
                 continue
             seen.add(key)
             yield path
     for base in bases:
-        for version in kicad_runtime_versions():
-            for path in common_files_under(base / version):
-                key = str(path).lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                yield path
-        for path in common_files_under(base):
+        for path in common_files_for_base(base, versions):
             key = str(path).lower()
             if key in seen:
                 continue
             seen.add(key)
             yield path
+
+def kicad_platform_config_bases(home, system, appdata=None, xdg_config_home=None):
+    system = (system or '').lower()
+    home = Path(home)
+    if system == 'windows':
+        if appdata:
+            yield Path(appdata) / 'kicad'
+            yield Path(appdata) / 'KiCad'
+    elif system == 'darwin':
+        yield home / 'Library' / 'Preferences' / 'kicad'
+        yield home / 'Library' / 'Preferences' / 'KiCad'
+        yield home / 'Library' / 'Application Support' / 'kicad'
+        yield home / 'Library' / 'Application Support' / 'KiCad'
+    else:
+        config_home = Path(xdg_config_home) if xdg_config_home else home / '.config'
+        yield config_home / 'kicad'
+        yield config_home / 'KiCad'
 
 def kicad_runtime_config_paths():
     seen = set()
@@ -245,6 +276,9 @@ def kicad_runtime_versions():
         yield from emit(value)
 
 def common_files_under(base):
+    if base.exists() and base.is_file():
+        yield base
+        return
     names = ('kicad_common.json', 'kicad_common', 'kicad.json', 'kicad', 'pcbnew.json', 'pcbnew', 'eeschema.json', 'eeschema')
     for name in names:
         direct = base / name
@@ -262,3 +296,14 @@ def common_files_under(base):
                     yield candidate
     except Exception:
         return
+
+def common_files_for_base(base, versions):
+    base = Path(base)
+    if base.exists() and base.is_file():
+        yield base
+        return
+    for version in versions:
+        for path in common_files_under(base / version):
+            yield path
+    for path in common_files_under(base):
+        yield path

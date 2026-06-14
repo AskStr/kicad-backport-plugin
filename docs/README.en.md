@@ -88,5 +88,19 @@ Command-line launcher:
 python plugin\plugin.py --input <input-path> --output <output-path> --target-version 5.0 --report report.json
 ```
 
+## Build Package
+
+Build the plugin archive from the repository root:
+
+```powershell
+.\build.ps1 -Format all
+```
+
+```sh
+./build.sh --format all
+```
+
+Supported package formats are `zip`, `tar.gz`, and `all`.
+
 Check the converted copy in the target KiCad version before sharing or
 manufacturing from it.

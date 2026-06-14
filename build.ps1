@@ -1,5 +1,7 @@
 param(
-    [string]$Version
+    [string]$Version,
+    [ValidateSet("zip", "tar.gz", "all")]
+    [string]$Format = "zip"
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,4 +11,4 @@ if (-not (Test-Path -LiteralPath $packageScript)) {
     throw "Package script not found: $packageScript"
 }
 
-& $packageScript -Version $Version
+& $packageScript -Version $Version -Format $Format

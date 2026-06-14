@@ -82,4 +82,18 @@ KiCad API/API server。
 python plugin\plugin.py --input <input-path> --output <output-path> --target-version 5.0 --report report.json
 ```
 
+## 建置安裝包
+
+在倉庫根目錄建置外掛壓縮包：
+
+```powershell
+.\build.ps1 -Format all
+```
+
+```sh
+./build.sh --format all
+```
+
+支援的打包格式為 `zip`、`tar.gz` 和 `all`。
+
 請在目標 KiCad 版本中檢查轉換後的副本，再用於分享或製造。

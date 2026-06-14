@@ -1,5 +1,7 @@
 param(
-    [string]$Version
+    [string]$Version,
+    [ValidateSet("zip", "tar.gz", "all")]
+    [string]$Format = "zip"
 )
 
 $ErrorActionPreference = "Stop"
@@ -7,7 +9,8 @@ $ErrorActionPreference = "Stop"
 $PluginRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $DistRoot = Join-Path $PluginRoot "dist"
 $PackageRoot = Join-Path $DistRoot "kicad-backport"
-$ArchivePath = Join-Path $DistRoot "kicad-backport.zip"
+$ZipArchivePath = Join-Path $DistRoot "kicad-backport.zip"
+$TarGzArchivePath = Join-Path $DistRoot "kicad-backport.tar.gz"
 
 if (-not $Version) {
     $PluginJson = Get-Content -LiteralPath (Join-Path $PluginRoot "plugin.json") -Raw | ConvertFrom-Json
@@ -49,33 +52,157 @@ foreach ($file in $requiredPackageFiles) {
     }
 }
 
-Compress-Archive -LiteralPath $PackageRoot -DestinationPath $ArchivePath -Force
+function Get-ArchiveEntryName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
 
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-$zip = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
-try {
+    $separators = [char[]]@(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $distFull = [System.IO.Path]::GetFullPath($DistRoot).TrimEnd($separators)
+    $pathFull = [System.IO.Path]::GetFullPath($Path)
+    $relative = $pathFull.Substring($distFull.Length).TrimStart($separators)
+    return $relative.Replace("\", "/")
+}
+
+function Assert-ArchiveEntries {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Entries,
+        [Parameter(Mandatory = $true)]
+        [string]$ArchiveName
+    )
+
     $hasPackageRoot = $false
-    $archiveEntries = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($entry in $zip.Entries) {
-        [void]$archiveEntries.Add($entry.FullName)
-        if ($entry.FullName -like 'kicad-backport/*') {
+    $archiveEntries = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($entry in $Entries) {
+        if ($entry.Contains("\")) {
+            throw "$ArchiveName contains a Windows path separator: $entry"
+        }
+        [void]$archiveEntries.Add($entry)
+        if ($entry -like 'kicad-backport/*') {
             $hasPackageRoot = $true
         }
     }
     if (-not $hasPackageRoot) {
-        throw "Archive does not contain the kicad-backport directory."
+        throw "$ArchiveName does not contain the kicad-backport directory."
     }
     foreach ($file in $requiredPackageFiles) {
         $entryName = "kicad-backport/$file"
         if (-not $archiveEntries.Contains($entryName)) {
-            throw "Archive is missing required file: $entryName"
+            throw "$ArchiveName is missing required file: $entryName"
         }
     }
 }
-finally {
-    $zip.Dispose()
+
+function New-ZipPackageArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath
+    )
+
+    Add-Type -AssemblyName System.IO.Compression
+    if (Test-Path -LiteralPath $ArchivePath) {
+        Remove-Item -LiteralPath $ArchivePath -Force
+    }
+
+    $stream = [System.IO.File]::Open($ArchivePath, [System.IO.FileMode]::CreateNew)
+    $zip = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        Get-ChildItem -LiteralPath $PackageRoot -Recurse -File |
+            Sort-Object FullName |
+            ForEach-Object {
+                $entryName = Get-ArchiveEntryName -Path $_.FullName
+                $entry = $zip.CreateEntry($entryName, [System.IO.Compression.CompressionLevel]::Optimal)
+                $entryStream = $entry.Open()
+                $fileStream = [System.IO.File]::OpenRead($_.FullName)
+                try {
+                    $fileStream.CopyTo($entryStream)
+                }
+                finally {
+                    $fileStream.Dispose()
+                    $entryStream.Dispose()
+                }
+            }
+    }
+    finally {
+        $zip.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Test-ZipPackageArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        Assert-ArchiveEntries -Entries @($zip.Entries | ForEach-Object { $_.FullName }) -ArchiveName "Archive"
+    }
+    finally {
+        $zip.Dispose()
+    }
+}
+
+function New-TarGzPackageArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath
+    )
+
+    if (Test-Path -LiteralPath $ArchivePath) {
+        Remove-Item -LiteralPath $ArchivePath -Force
+    }
+
+    $tar = Get-Command tar -ErrorAction SilentlyContinue
+    if (-not $tar) {
+        throw "tar was not found; cannot create .tar.gz archive."
+    }
+
+    & $tar.Source -czf $ArchivePath -C $DistRoot "kicad-backport"
+    if ($LASTEXITCODE -ne 0) {
+        throw "tar failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Test-TarGzPackageArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath
+    )
+
+    $tar = Get-Command tar -ErrorAction SilentlyContinue
+    if (-not $tar) {
+        throw "tar was not found; cannot verify .tar.gz archive."
+    }
+
+    $entries = & $tar.Source -tzf $ArchivePath
+    if ($LASTEXITCODE -ne 0) {
+        throw "tar verification failed with exit code $LASTEXITCODE."
+    }
+    Assert-ArchiveEntries -Entries @($entries) -ArchiveName "Archive"
+}
+
+$builtArchives = @()
+if ($Format -in @("zip", "all")) {
+    New-ZipPackageArchive -ArchivePath $ZipArchivePath
+    Test-ZipPackageArchive -ArchivePath $ZipArchivePath
+    $builtArchives += $ZipArchivePath
+}
+if ($Format -in @("tar.gz", "all")) {
+    New-TarGzPackageArchive -ArchivePath $TarGzArchivePath
+    Test-TarGzPackageArchive -ArchivePath $TarGzArchivePath
+    $builtArchives += $TarGzArchivePath
 }
 
 Write-Host "Built unpacked package: $PackageRoot"
-Write-Host "Built archive: $ArchivePath"
+foreach ($archive in $builtArchives) {
+    Write-Host "Built archive: $archive"
+}
 Write-Host "Version: $Version"

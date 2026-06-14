@@ -85,5 +85,19 @@ CLI:
 python plugin\plugin.py --input <input-path> --output <output-path> --target-version 5.0 --report report.json
 ```
 
+## Creare il pacchetto
+
+Creare l'archivio del plugin dalla radice del repository:
+
+```powershell
+.\build.ps1 -Format all
+```
+
+```sh
+./build.sh --format all
+```
+
+I formati pacchetto supportati sono `zip`, `tar.gz` e `all`.
+
 Controllare la copia convertita nella versione KiCad di destinazione prima di
 condividerla o usarla per la produzione.

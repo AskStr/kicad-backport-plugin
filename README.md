@@ -148,6 +148,20 @@ List GUI-supported targets:
 python plugin\plugin.py --list-targets
 ```
 
+## Build Package
+
+Build the plugin archive from the repository root:
+
+```powershell
+.\build.ps1 -Format all
+```
+
+```sh
+./build.sh --format all
+```
+
+The supported package formats are `zip`, `tar.gz`, and `all`.
+
 Useful environment variables:
 
 - `KICAD_BACKPORT_PYTHON`: Python 3 executable used by the KiCad 5 launcher.

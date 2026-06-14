@@ -2,7 +2,7 @@
 
 Copyright (C) 问星/askstar
 
-Version 0.4.1
+Version 0.4.3
 
 KiCad Backport creates a compatibility copy of a KiCad project or file for an
 older KiCad target version. It is designed for practical downgrade and upgrade
@@ -39,6 +39,11 @@ installations.
   project outputs when needed.
 - Writes V6/V7/V8 project-local `.kicad_prl` files with compatible visible
   items and layers for board outputs.
+- Extracts embedded PCB/footprint 3D model resources to project-local `3D/`
+  files when zstd decompression is available. The core includes a small
+  built-in zstd frame decoder for raw/RLE blocks and can also use Python's
+  standard `compression.zstd`, system `libzstd`, or the optional `zstandard`
+  package for full compressed blocks.
 - Uses compatibility rewrites for newer PCB, footprint, schematic, symbol,
   worksheet, and design-rule features that are not accepted by older KiCad
   versions.

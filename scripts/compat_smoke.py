@@ -2,13 +2,20 @@ import shutil
 import sys
 import tempfile
 import re
+import base64
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugin"))
 
-from backport_core import convert, resolve_target_version, versioned_output_path  # noqa: E402
+from backport_core import (  # noqa: E402
+    _self_zstd_compress_raw_frame,
+    convert,
+    resolve_target_version,
+    versioned_output_path,
+    zstd_decompress,
+)
 
 
 def main():
@@ -19,8 +26,13 @@ def main():
         assert resolve_target_version("schematic", "20260521") == "20260306"
         assert resolve_target_version("symbol-library", "20260603") == "20251024"
         assert resolve_target_version("board", "5.0") == "20171130"
+        assert resolve_target_version("design-rules", "8.0") == "1"
         assert versioned_output_path(work / "demo.kicad_sch", "5.0").name == "demo_V5.sch"
         assert versioned_output_path(work / "demo.kicad_pcb", "20260521").name == "demo_V20260521.kicad_pcb"
+        raw_zstd = _self_zstd_compress_raw_frame(b"raw-zstd-model")
+        decoded, decoder = zstd_decompress(raw_zstd)
+        assert decoded == b"raw-zstd-model"
+        assert decoder == "built-in raw/RLE zstd decoder"
 
         pcb = work / "board.kicad_pcb"
         pcb.write_text(
@@ -74,7 +86,7 @@ def main():
             '(filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 2 0) (xy 2 2) (xy 0 2))) '
             '(filled_polygon (layer "B.Cu") (pts (xy 0 0) (xy 2 0) (xy 2 2) (xy 0 2)))) '
             '(zone (keepout (tracks not_allowed))) '
-            '(via (at 4 4) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") free (net "N1")) '
+            '(via (at 4 4) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (free yes) (net "N1")) '
             '(segment (start 0 0) (end 1 1) (width 0.2) (layer "F.Cu") (net "")))\n',
             encoding="utf-8",
         )
@@ -158,6 +170,14 @@ def main():
         assert "User.Drawings" not in board9_text
         assert "User.5" not in board9_text
 
+        _out, _err, code = convert(pcb, work / "board7_out.kicad_pcb", "7.0")
+        assert code == 0
+        board_v7 = work / "board7_out_V7.kicad_pcb"
+        board7_text = board_v7.read_text(encoding="utf-8")
+        assert "free" not in board7_text
+        assert "(free)" not in board7_text
+        assert '(layers "F.Cu" "B.Cu")' in " ".join(board7_text.split())
+
         _out, _err, code = convert(pcb, work / "board4_out.kicad_pcb", "4.0")
         assert code == 0
         board_v4 = work / "board4_out_V4.kicad_pcb"
@@ -226,6 +246,22 @@ def main():
         assert "(version 20221018)" in rect_net_v7
         assert "(gr_rect" in rect_net_v7
         assert "(net 1)" not in rect_net_v7
+
+        fp_property = work / "fp_property.kicad_pcb"
+        fp_property.write_text(
+            '(kicad_pcb (version 20260603) (generator "x") (paper "A4") '
+            '(layers (0 "F.Cu" signal)) '
+            '(footprint "Logo" (layer "F.Cu") '
+            '(property "Reference" "G***" (at 0 0 0) (layer "F.SilkS") (hide yes) '
+            '(effects (font (size 1 1))))))\n',
+            encoding="utf-8",
+        )
+        _out, _err, code = convert(fp_property, work / "fp_property_out.kicad_pcb", "7.0")
+        assert code == 0
+        fp_property_v7 = (work / "fp_property_out_V7.kicad_pcb").read_text(encoding="utf-8")
+        fp_property_v7_compact = " ".join(fp_property_v7.split())
+        assert "(fp_text" in fp_property_v7
+        assert '(fp_text reference "G***" (at 0 0 0) (layer "F.SilkS") (effects (font (size 1 1)) hide))' in fp_property_v7_compact
 
         sym = work / "demo.kicad_sym"
         sym.write_text(
@@ -527,6 +563,7 @@ def main():
         sch = work / "demo.kicad_sch"
         sch.write_text(
             '(kicad_sch (version 20260306) (generator "x") (paper "A4") '
+            '(uuid "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb") '
             '(title_block (title "Demo") (date "2026-06-07") (rev "A") '
             '(company "AskStar") (comment 1 "Checked")) '
             '(wire (pts (xy 0 0) (xy 10 0))) '
@@ -628,7 +665,7 @@ def main():
         assert '(property "Custom" "C" (id 7)' in sch6_compact
         assert "(instances" not in sch6_text
         assert "(symbol_instances" in sch6_text
-        assert '(pin "1" (uuid 99999999-9999-9999-9999-999999999999))' in sch6_compact
+        assert '(pin "1" (uuid 99999999-9999-9999-9999-999999999999))' not in sch6_compact
         assert '(path "/87654321-1234-1234-1234-123456789abc"' in sch6_compact
 
         _out, _err, code = convert(sch, work / "demo_sch7_out.kicad_sch", "7.0")
@@ -748,7 +785,14 @@ def main():
             '(footprint "LocalPart" (version 20211014) (generator "x") (layer "F.Cu"))\n',
             encoding="utf-8",
         )
-        (project / "demo.kicad_pro").write_text('{"meta": {"version": 1}}\n', encoding="utf-8")
+        (project / "demo.kicad_pro").write_text(
+            '{"meta": {"version": 1}, "schematic": {"page_layout_descr_file": "kicad-embed://layout.kicad_wks"}}\n',
+            encoding="utf-8",
+        )
+        (project / "demo.kicad_dru").write_text(
+            '(version 1)\n(rule "clearance" (constraint clearance (min 0.2mm)))\n',
+            encoding="utf-8",
+        )
         (project / "demo.kicad_prl").write_text(
             '{"board": {"visible_items": ["vias", "tracks", "zones"], '
             '"visible_layers": "0000000f_ffffffff"}}\n',
@@ -765,18 +809,25 @@ def main():
         (project / "demo.kicad_sch").write_text(sch.read_text(encoding="utf-8"), encoding="utf-8")
         (project / "child.kicad_sch").write_text(
             '(kicad_sch (version 20260306) (generator "x") (paper "A4") '
+            '(uuid "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb") '
             '(symbol (lib_id "demo:Demo_Symbol") (at 5 5 0) '
             '(uuid "22222222-2222-2222-2222-222222222222") '
-            '(property "Reference" "U2" (at 5 5 0)) '
-            '(property "Value" "Demo_Symbol" (at 5 7 0))) '
+            '(property "Reference" "U" (at 5 5 0)) '
+            '(property "Value" "Demo_Symbol" (at 5 7 0)) '
+            '(instances (project "demo" '
+            '(path "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/12345678-1234-1234-1234-123456789abc/22222222-2222-2222-2222-222222222222" '
+            '(reference "U2") (unit 1))))) '
             '(sheet_instances (path "/" (page "1"))) '
             '(symbol_instances))\n',
             encoding="utf-8",
         )
+        embedded_model = base64.b64encode(_self_zstd_compress_raw_frame(b"solid model\n")).decode("ascii")
         (project / "demo.kicad_pcb").write_text(
             '(kicad_pcb (version 20260603) (generator "x") '
             '(paper "A4") (layers (0 "F.Cu" signal)) '
-            '(footprint "Local:LocalPart" (layer "F.Cu")))\n',
+            '(embedded_files (file (name "demo.step") (type "model") (data |' + embedded_model + '|))) '
+            '(footprint "Local:LocalPart" (layer "F.Cu") '
+            '(model "kicad-embed://demo.step")))\n',
             encoding="utf-8",
         )
         _out, _err, code = convert(project, work / "project_out", "5.0")
@@ -785,9 +836,17 @@ def main():
         assert (project_v5 / "demo.lib").exists()
         assert not (project_v5 / "demo.kicad_sym").exists()
         assert (project_v5 / "demo.pro").exists()
+        assert not (project_v5 / "demo.kicad_dru").exists()
         assert not (project_v5 / "demo.kicad_pro").exists()
+        assert (project_v5 / "3D" / "demo.step").read_bytes() == b"solid model\n"
+        project_v5_board_text = (project_v5 / "demo.kicad_pcb").read_text(encoding="utf-8")
+        assert '${KIPRJMOD}/3D/demo.step' in project_v5_board_text
+        assert "kicad-embed://" not in project_v5_board_text
+        assert "embedded_files" not in project_v5_board_text
         project_pro_text = (project_v5 / "demo.pro").read_text(encoding="utf-8")
         assert "last_client=kicad-backport" in project_pro_text
+        assert "[general]" in project_pro_text
+        assert "[eeschema]" in project_pro_text
         assert "LibName1=demo" in project_pro_text
         sym_table = (project_v5 / "sym-lib-table").read_text(encoding="utf-8")
         assert '(type "Legacy")' in sym_table
@@ -867,6 +926,9 @@ def main():
         assert code == 0
         project_v7 = work / "project_out7_V7"
         assert (project_v7 / "sym-lib-table").exists()
+        assert (project_v7 / "demo.kicad_dru").exists()
+        project_v7_json = (project_v7 / "demo.kicad_pro").read_text(encoding="utf-8")
+        assert '"page_layout_descr_file": ""' in project_v7_json
         project_v7_sym_table = (project_v7 / "sym-lib-table").read_text(encoding="utf-8")
         assert '(name "demo")' in project_v7_sym_table
         assert '${KIPRJMOD}/demo.kicad_sym' in project_v7_sym_table
@@ -875,6 +937,30 @@ def main():
         assert '"demo:Demo_Symbol"' in project_v7_sch
         assert "/12345678-1234-1234-1234-123456789abc/22222222-2222-2222-2222-222222222222" in project_v7_sch
         assert '"U2"' in project_v7_sch
+        assert "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/12345678-1234-1234-1234-123456789abc" not in project_v7_sch
+        project_v7_child = (project_v7 / "child.kicad_sch").read_text(encoding="utf-8")
+        project_v7_child_compact = " ".join(project_v7_child.split())
+        assert "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/12345678-1234-1234-1234-123456789abc" not in project_v7_child
+        assert "/12345678-1234-1234-1234-123456789abc" in project_v7_child
+        assert '(property "Reference" "U2"' in project_v7_child_compact
+
+        _out, _err, code = convert(project, work / "project_out9", "9.0")
+        assert code == 0
+        project_v9 = work / "project_out9_V9"
+        project_v9_sch = (project_v9 / "demo.kicad_sch").read_text(encoding="utf-8")
+        project_v9_child = (project_v9 / "child.kicad_sch").read_text(encoding="utf-8")
+        project_v9_child_compact = " ".join(project_v9_child.split())
+        assert "(symbol_instances" not in project_v9_sch
+        assert "/12345678-1234-1234-1234-123456789abc/22222222-2222-2222-2222-222222222222" not in project_v9_child
+        assert "(instances" not in project_v9_child
+        assert "(sheet_instances" not in project_v9_child
+        assert "(symbol_instances" not in project_v9_child
+        assert '(uuid "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")' in project_v9_child
+        assert "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/12345678-1234-1234-1234-123456789abc" not in project_v9_sch
+        assert "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/12345678-1234-1234-1234-123456789abc" not in project_v9_child
+        assert '(property "Reference" "U2"' in project_v9_child_compact
+        assert '(reference "?")' not in project_v9_sch
+        assert '(reference "?")' not in project_v9_child
         prl = (work / "project_out7_V7" / "demo.kicad_prl").read_text(encoding="utf-8")
         assert '"version": 3' in prl
         assert '"visible_layers": "000000f_ffffffff"' in prl

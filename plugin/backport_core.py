@@ -2,9 +2,15 @@ import json
 import math
 import shutil
 import hashlib
+import base64
+import ctypes
+import ctypes.util
+import os
+import re
+import glob
 from pathlib import Path
 from typing import Callable, Iterable, Optional
-VERSION = '0.4.1'
+VERSION = '0.4.3'
 ESCAPES = {'n': '\n', 't': '\t', '"': '"', '\\': '\\'}
 
 class Node:
@@ -249,6 +255,394 @@ def _write_text(path, text):
     with Path(path).open('w', encoding='utf-8', newline='') as out:
         out.write(text)
 
+def _write_binary(path, data):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with Path(path).open('wb') as out:
+        out.write(data)
+
+ZSTD_MAGIC = b'\x28\xb5\x2f\xfd'
+ZSTD_SKIPPABLE_MAGIC_MIN = 0x184D2A50
+ZSTD_SKIPPABLE_MAGIC_MAX = 0x184D2A5F
+MAX_EMBEDDED_ZSTD_OUTPUT = 256 * 1024 * 1024
+
+class ZstdSelfDecodeUnsupported(Exception):
+    pass
+
+def _read_le(data, pos, size):
+    if pos + size > len(data):
+        raise ValueError('truncated zstd frame')
+    return (int.from_bytes(data[pos:pos + size], 'little'), pos + size)
+
+def _zstd_self_frame_header(data, pos):
+    if pos + 4 > len(data) or data[pos:pos + 4] != ZSTD_MAGIC:
+        raise ValueError('missing zstd frame magic')
+    pos += 4
+    if pos >= len(data):
+        raise ValueError('truncated zstd frame header')
+    descriptor = data[pos]
+    pos += 1
+    if descriptor & 0x08:
+        raise ValueError('unsupported zstd reserved frame header bit')
+    fcs_flag = descriptor >> 6
+    single_segment = bool(descriptor & 0x20)
+    checksum = bool(descriptor & 0x04)
+    dict_id_flag = descriptor & 0x03
+    if not single_segment:
+        _window_descriptor, pos = _read_le(data, pos, 1)
+    dict_size = (0, 1, 2, 4)[dict_id_flag]
+    if dict_size:
+        _dictionary_id, pos = _read_le(data, pos, dict_size)
+    if fcs_flag == 0:
+        fcs_size = 1 if single_segment else 0
+    elif fcs_flag == 1:
+        fcs_size = 2
+    elif fcs_flag == 2:
+        fcs_size = 4
+    else:
+        fcs_size = 8
+    content_size = None
+    if fcs_size:
+        content_size, pos = _read_le(data, pos, fcs_size)
+        if fcs_size == 2:
+            content_size += 256
+    return pos, checksum, content_size
+
+def _zstd_decompress_self(data, max_output=MAX_EMBEDDED_ZSTD_OUTPUT):
+    pos = 0
+    out = bytearray()
+    saw_frame = False
+    while pos < len(data):
+        if pos + 4 > len(data):
+            raise ValueError('trailing bytes after zstd frame')
+        magic = int.from_bytes(data[pos:pos + 4], 'little')
+        if ZSTD_SKIPPABLE_MAGIC_MIN <= magic <= ZSTD_SKIPPABLE_MAGIC_MAX:
+            pos += 4
+            size, pos = _read_le(data, pos, 4)
+            if pos + size > len(data):
+                raise ValueError('truncated zstd skippable frame')
+            pos += size
+            continue
+        frame_start = pos
+        header_pos, checksum, content_size = _zstd_self_frame_header(data, pos)
+        pos = header_pos
+        frame_out_start = len(out)
+        saw_frame = True
+        last_block = False
+        while not last_block:
+            header, pos = _read_le(data, pos, 3)
+            last_block = bool(header & 1)
+            block_type = (header >> 1) & 0x03
+            block_size = header >> 3
+            if block_type == 0:
+                if pos + block_size > len(data):
+                    raise ValueError('truncated zstd raw block')
+                out.extend(data[pos:pos + block_size])
+                pos += block_size
+            elif block_type == 1:
+                if pos >= len(data):
+                    raise ValueError('truncated zstd RLE block')
+                out.extend(bytes([data[pos]]) * block_size)
+                pos += 1
+            elif block_type == 2:
+                raise ZstdSelfDecodeUnsupported(
+                    'zstd compressed blocks need Huffman/FSE sequence decoding'
+                )
+            else:
+                raise ValueError('reserved zstd block type')
+            if len(out) > max_output:
+                raise ValueError('zstd output exceeds embedded model safety limit')
+        if checksum:
+            _checksum, pos = _read_le(data, pos, 4)
+        if content_size is not None and len(out) - frame_out_start != content_size:
+            raise ValueError('zstd frame content size mismatch at byte {}'.format(frame_start))
+    if not saw_frame:
+        raise ValueError('missing zstd frame')
+    return bytes(out)
+
+def _self_zstd_compress_raw_frame(data):
+    if len(data) > 0x1FFFFF:
+        raise ValueError('test helper only supports one raw zstd block')
+    descriptor = 0x20
+    header = bytearray(ZSTD_MAGIC)
+    header.append(descriptor)
+    header.append(len(data) & 0xFF)
+    block_header = (1 | (0 << 1) | (len(data) << 3)).to_bytes(3, 'little')
+    return bytes(header) + block_header + data
+
+def _zstd_decompress_stdlib(data):
+    try:
+        from compression import zstd as std_zstd
+    except Exception:
+        return None, 'Python compression.zstd is unavailable'
+    if hasattr(std_zstd, 'decompress'):
+        return std_zstd.decompress(data), 'Python compression.zstd'
+    if hasattr(std_zstd, 'ZstdDecompressor'):
+        decompressor = std_zstd.ZstdDecompressor()
+        if hasattr(decompressor, 'decompress'):
+            return decompressor.decompress(data), 'Python compression.zstd'
+    return None, 'Python compression.zstd has no supported decompression API'
+
+def _zstd_decompress_ctypes(data, max_output=MAX_EMBEDDED_ZSTD_OUTPUT):
+    names = []
+    found = ctypes.util.find_library('zstd')
+    if found:
+        names.append(found)
+    names.extend(['zstd', 'libzstd', 'libzstd.dll', 'zstd.dll'])
+    for directory in os.environ.get('PATH', '').split(os.pathsep):
+        if not directory:
+            continue
+        base = Path(directory)
+        names.extend(str(base / filename) for filename in ('zstd.dll', 'libzstd.dll'))
+    for pattern in (
+        r'D:\KiCad\*\bin',
+        r'C:\Program Files\KiCad\*\bin',
+        r'C:\Program Files\KiCad\bin',
+    ):
+        for base in glob.glob(pattern):
+            base = Path(base)
+            names.extend(str(base / filename) for filename in ('zstd.dll', 'libzstd.dll'))
+    last_error = ''
+    lib = None
+    tried = set()
+    for name in names:
+        if name in tried:
+            continue
+        tried.add(name)
+        try:
+            lib = ctypes.CDLL(name)
+            break
+        except Exception as exc:
+            last_error = str(exc)
+    if lib is None:
+        return None, 'system libzstd is unavailable' + (': ' + last_error if last_error else '')
+    size_t = ctypes.c_size_t
+    lib.ZSTD_decompress.argtypes = [ctypes.c_void_p, size_t, ctypes.c_void_p, size_t]
+    lib.ZSTD_decompress.restype = size_t
+    lib.ZSTD_isError.argtypes = [size_t]
+    lib.ZSTD_isError.restype = ctypes.c_uint
+    lib.ZSTD_getErrorName.argtypes = [size_t]
+    lib.ZSTD_getErrorName.restype = ctypes.c_char_p
+    get_content_size = getattr(lib, 'ZSTD_getFrameContentSize', None)
+    output_size = 1024 * 1024
+    source = ctypes.create_string_buffer(data)
+    if get_content_size is not None:
+        get_content_size.argtypes = [ctypes.c_void_p, size_t]
+        get_content_size.restype = ctypes.c_ulonglong
+        value = get_content_size(source, len(data))
+        if value == 0xFFFFFFFFFFFFFFFF:
+            return None, 'embedded data is not a valid zstd frame'
+        if value != 0xFFFFFFFFFFFFFFFE:
+            if value > max_output:
+                return None, 'embedded zstd frame is too large'
+            output_size = int(value)
+    while output_size <= max_output:
+        dest = ctypes.create_string_buffer(output_size)
+        result = lib.ZSTD_decompress(dest, output_size, source, len(data))
+        if not lib.ZSTD_isError(result):
+            return dest.raw[:int(result)], 'system libzstd'
+        error = (lib.ZSTD_getErrorName(result) or b'').decode('utf-8', 'replace')
+        if 'Destination buffer is too small' not in error and 'dstSize_tooSmall' not in error:
+            return None, error or 'system libzstd decompression failed'
+        output_size *= 2
+    return None, 'embedded zstd frame is too large'
+
+def _zstd_decompress_optional_package(data):
+    try:
+        import zstandard
+    except Exception:
+        return None, 'optional zstandard package is unavailable'
+    decompressor = zstandard.ZstdDecompressor()
+    try:
+        return decompressor.decompress(data, max_output_size=MAX_EMBEDDED_ZSTD_OUTPUT), 'optional zstandard package'
+    except Exception:
+        with decompressor.stream_reader(data) as reader:
+            chunks = []
+            total = 0
+            while True:
+                chunk = reader.read(128 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_EMBEDDED_ZSTD_OUTPUT:
+                    raise ValueError('embedded zstd frame is too large')
+                chunks.append(chunk)
+            return b''.join(chunks), 'optional zstandard package'
+
+def zstd_decompress(data):
+    errors = []
+    try:
+        return _zstd_decompress_self(data), 'built-in raw/RLE zstd decoder'
+    except Exception as exc:
+        errors.append('built-in raw/RLE decoder: {}'.format(exc))
+    for decoder in (_zstd_decompress_stdlib, _zstd_decompress_ctypes, _zstd_decompress_optional_package):
+        try:
+            decoded, source = decoder(data)
+            if decoded is not None:
+                return decoded, source
+        except Exception as exc:
+            errors.append(str(exc))
+            continue
+        errors.append(source)
+    raise ValueError('; '.join(errors))
+
+def _is_path_separator(ch):
+    return ch in {'/', '\\'}
+
+def _safe_embedded_filename(name):
+    out = []
+    for ch in name:
+        code = ord(ch)
+        if ch in {':', '*', '?', '"', '<', '>', '|'} or _is_path_separator(ch) or code < 32:
+            out.append('_')
+        else:
+            out.append(ch)
+    text = ''.join(out).strip().rstrip('. ')
+    if not text or text in {'.', '..'}:
+        return 'embedded_model.step'
+    return text
+
+def _embedded_uri_filename(value):
+    prefix = 'kicad-embed://'
+    if not value.startswith(prefix):
+        return ''
+    name = value[len(prefix):]
+    while name and _is_path_separator(name[0]):
+        name = name[1:]
+    return _safe_embedded_filename(name)
+
+def _is_model_filename(name):
+    return Path(name).suffix.lower() in {'.step', '.stp', '.wrl', '.iges', '.igs', '.stl', '.obj'}
+
+def _embedded_data_atom_text(data_node):
+    if not data_node or data_node.atom is not None or data_node.head() != 'data':
+        return ''
+    parts = []
+    for child in data_node.children[1:]:
+        if child.atom is None:
+            continue
+        text = child.atom
+        if text.startswith('|'):
+            text = text[1:]
+        if text.endswith('|'):
+            text = text[:-1]
+        parts.append(text)
+    return ''.join(parts)
+
+def collect_embedded_files(root):
+    files = {}
+    for node in _walk(root):
+        if node.head() not in {'embedded_files', 'embedded_file'}:
+            continue
+        for child in node.children:
+            if child.atom is not None or child.head() != 'file':
+                continue
+            name = _safe_embedded_filename(_child_atom_or_empty(child, 'name'))
+            files[name] = {
+                'name': name,
+                'type': _child_atom_or_empty(child, 'type'),
+                'data': _embedded_data_atom_text(child.child_list('data')),
+            }
+    return files
+
+def rewrite_embedded_model_uris(root, extracted_names, remove_unresolved):
+    changed = 0
+
+    def visit(node):
+        nonlocal changed
+        if node.atom is not None:
+            return
+        kept = []
+        for child in node.children:
+            remove = False
+            if child.atom is None and child.head() == 'model':
+                name = _embedded_uri_filename(child.atom_at(1))
+                if name:
+                    if name in extracted_names:
+                        if child.set_atom_at(1, '${KIPRJMOD}/3D/' + name, True):
+                            changed += 1
+                    elif remove_unresolved:
+                        remove = True
+                        changed += 1
+            if remove:
+                continue
+            if child.atom is None:
+                visit(child)
+            kept.append(child)
+        node.children = kept
+
+    visit(root)
+    return changed
+
+def remove_embedded_file_nodes(root):
+    removed = 0
+
+    def visit(node):
+        nonlocal removed
+        if node.atom is not None:
+            return
+        kept = []
+        for child in node.children:
+            if child.atom is None and child.head() in {'embedded_files', 'embedded_file'}:
+                removed += 1
+                continue
+            if child.atom is None:
+                visit(child)
+            kept.append(child)
+        node.children = kept
+
+    visit(root)
+    return removed
+
+def externalize_embedded_models_for_legacy_targets(doc, output_path):
+    if not doc.root or doc.kind not in {'board', 'footprint'}:
+        return []
+    files = collect_embedded_files(doc.root)
+    if not files:
+        return []
+    warnings = []
+    extracted_names = set()
+    model_dir = output_path.parent / '3D'
+    for item in files.values():
+        name = item['name']
+        if item['type'] != 'model' or not _is_model_filename(name):
+            continue
+        try:
+            compressed = base64.b64decode(item['data'], validate=True)
+        except Exception as exc:
+            warnings.append('could not decode embedded 3D model {}: {}'.format(name, exc))
+            continue
+        try:
+            decompressed, source = zstd_decompress(compressed)
+        except Exception as exc:
+            warnings.append('could not extract embedded 3D model {}: {}'.format(name, exc))
+            continue
+        _write_binary(model_dir / name, decompressed)
+        extracted_names.add(name)
+        if source != 'built-in raw/RLE zstd decoder':
+            warnings.append('extracted embedded 3D model {} using {}'.format(name, source))
+    rewritten = rewrite_embedded_model_uris(doc.root, extracted_names, True)
+    removed_containers = remove_embedded_file_nodes(doc.root)
+    removed_refs = max(0, rewritten - len(extracted_names))
+    if extracted_names:
+        warnings.append(
+            'extracted {} embedded 3D model file(s) to 3D/ and rewrote kicad-embed model references'.format(
+                len(extracted_names)
+            )
+        )
+    if removed_containers:
+        warnings.append(
+            'removed {} embedded file container(s) after externalizing 3D models'.format(
+                removed_containers
+            )
+        )
+    if removed_refs:
+        warnings.append(
+            'removed {} unresolved embedded 3D model reference(s) unsupported by the target format'.format(
+                removed_refs
+            )
+        )
+    return warnings
+
 class Document:
     def __init__(self, path, root, kind, version, raw_text=''):
         self.path = path
@@ -266,6 +660,19 @@ class FileReport:
         self.target_version = target_version
         self.changed = changed
         self.warnings = [] if warnings is None else warnings
+
+class ProjectCopyEntry:
+    __slots__ = ('source', 'output', 'is_document', 'report')
+
+    def __init__(self, source, output, is_document=False, report=None):
+        self.source = source
+        self.output = output
+        self.is_document = is_document
+        self.report = report
+
+    def __iter__(self):
+        yield self.source
+        yield self.output
 
 def _is_number(value):
     return bool(value) and value.isdigit()
@@ -355,7 +762,7 @@ def detect_kind(path, top_level):
     if top_level in by_head:
         return by_head[top_level]
     return {'.pro': 'legacy-project', '.sch': 'legacy-schematic', '.lib': 'legacy-symbol-library', '.dcm': 'legacy-symbol-documentation', '.kicad_pro': 'project', '.kicad_sym': 'symbol-library', '.kicad_sch': 'schematic', '.kicad_pcb': 'board', '.kicad_mod': 'footprint', '.kicad_dru': 'design-rules', '.kicad_wks': 'worksheet'}.get(path.suffix.lower(), 'unknown')
-TARGET_VERSIONS = {'4.0': {'board': '4', 'footprint': '4'}, '5.0': {'board': '20171130', 'footprint': '20171130'}, '5.1': {'board': '20171130', 'footprint': '20171130'}, '6.0': {'symbol-library': '20211014', 'schematic': '20211123', 'board': '20211014', 'footprint': '20211014', 'worksheet': '20210606', 'design-rules': '20200610'}, '7.0': {'symbol-library': '20220914', 'schematic': '20230121', 'board': '20221018', 'footprint': '20221018', 'worksheet': '20220228', 'design-rules': '20200610'}, '8.0': {'symbol-library': '20231120', 'schematic': '20231120', 'board': '20240108', 'footprint': '20240108', 'worksheet': '20231118', 'design-rules': '20200610'}, '9.0': {'symbol-library': '20241209', 'schematic': '20250114', 'board': '20241229', 'footprint': '20241229', 'worksheet': '20231118', 'design-rules': '20200610'}, '10.0': {'symbol-library': '20251024', 'schematic': '20260306', 'board': '20260206', 'footprint': '20260206', 'worksheet': '20231118', 'design-rules': '20200610'}, '10.99': {'symbol-library': '20251024', 'schematic': '20260306', 'board': '20260603', 'footprint': '20260603', 'worksheet': '20231118', 'design-rules': '20200610'}}
+TARGET_VERSIONS = {'4.0': {'board': '4', 'footprint': '4'}, '5.0': {'board': '20171130', 'footprint': '20171130'}, '5.1': {'board': '20171130', 'footprint': '20171130'}, '6.0': {'symbol-library': '20211014', 'schematic': '20211123', 'board': '20211014', 'footprint': '20211014', 'worksheet': '20210606', 'design-rules': '1'}, '7.0': {'symbol-library': '20220914', 'schematic': '20230121', 'board': '20221018', 'footprint': '20221018', 'worksheet': '20220228', 'design-rules': '1'}, '8.0': {'symbol-library': '20231120', 'schematic': '20231120', 'board': '20240108', 'footprint': '20240108', 'worksheet': '20231118', 'design-rules': '1'}, '9.0': {'symbol-library': '20241209', 'schematic': '20250114', 'board': '20241229', 'footprint': '20241229', 'worksheet': '20231118', 'design-rules': '1'}, '10.0': {'symbol-library': '20251024', 'schematic': '20260306', 'board': '20260206', 'footprint': '20260206', 'worksheet': '20231118', 'design-rules': '1'}, '10.99': {'symbol-library': '20251024', 'schematic': '20260306', 'board': '20260603', 'footprint': '20260603', 'worksheet': '20231118', 'design-rules': '1'}}
 DEVELOPMENT_BOARD_TARGETS = {'20260521', '20260603'}
 
 def _normalize_alias(target):
@@ -416,6 +823,7 @@ def target_major_version(target):
 LEGACY_KIND_FOR_SEXPR = {'schematic': 'legacy-schematic', 'symbol-library': 'legacy-symbol-library', 'project': 'legacy-project'}
 SEXPR_KIND_FOR_LEGACY = {'legacy-schematic': 'schematic', 'legacy-symbol-library': 'symbol-library', 'legacy-symbol-documentation': 'symbol-library', 'legacy-project': 'project'}
 EXTENSION_FOR_KIND = {'legacy-schematic': '.sch', 'legacy-symbol-library': '.lib', 'legacy-symbol-documentation': '.dcm', 'legacy-project': '.pro', 'schematic': '.kicad_sch', 'symbol-library': '.kicad_sym', 'project': '.kicad_pro', 'board': '.kicad_pcb', 'footprint': '.kicad_mod'}
+KNOWN_OUTPUT_SUFFIXES = set(EXTENSION_FOR_KIND.values()) | {'.kicad_prl', '.kicad_dru', '.kicad_wks'}
 
 def with_target_family_extension(path, target):
     source_kind = detect_kind(path, '')
@@ -432,15 +840,21 @@ def with_target_family_extension(path, target):
 def versioned_output_path(path, target):
     output = with_target_family_extension(Path(path), target)
     label = target_version_suffix(target)
-    if not label or output.stem.lower().endswith(('_' + label).lower()):
+    suffix = output.suffix if output.suffix.lower() in KNOWN_OUTPUT_SUFFIXES else ''
+    stem = output.stem if suffix else output.name
+    if not label or stem.lower().endswith(('_' + label).lower()):
         return output
-    return output.with_name(output.stem + '_' + label + output.suffix)
+    return output.with_name(stem + '_' + label + suffix)
 
 def load_document(path):
     text = path.read_text(encoding='utf-8-sig')
     extension_kind = detect_kind(path, '')
     if extension_kind.startswith('legacy-'):
         return load_legacy_document(path, text)
+    if extension_kind == 'design-rules':
+        match = re.search(r'\(\s*version\s+([^) \t\r\n]+)', text)
+        version = match.group(1) if match else ''
+        return Document(path=path, root=sexpr_list(atom('kicad_dru')), kind='design-rules', version=version, raw_text=text)
     if extension_kind == 'project':
         version = ''
         try:
@@ -697,8 +1111,7 @@ def apply_child_value_rewrite_rules(root, warnings, rules):
                 if mode == 'presence-bool' and len(child.children) > 1:
                     value = child.atom_at(1).lower()
                     if value in {'yes', 'true', '1'}:
-                        child.children = child.children[:1]
-                        kept.append(child)
+                        kept.append(atom(child_head))
                         counts[index] += 1
                         handled = True
                         break
@@ -716,6 +1129,11 @@ def apply_child_value_rewrite_rules(root, warnings, rules):
 def remove_direct_children_by_head(root, head):
     before = len(root.children)
     root.children = [c for c in root.children if c.atom is not None or c.head() != head]
+    return before - len(root.children)
+
+def remove_direct_children_by_heads(root, heads):
+    before = len(root.children)
+    root.children = [c for c in root.children if c.atom is not None or c.head() not in heads]
     return before - len(root.children)
 
 def rename_child_head_in_parents(root, parents, old, new):
@@ -1225,7 +1643,15 @@ def downgrade_tenting_to_legacy_atoms(root):
 def _property_node(name, value):
     return sexpr_list(atom('property'), atom(name, True), atom(value, True))
 
-def downgrade_pcb_footprint_fields(root):
+def _append_fp_text_hide(text):
+    effects = text.child_list('effects')
+    if not effects:
+        text.children.append(sexpr_list(atom('effects'), atom('hide')))
+        return
+    if not any((child.atom == 'hide') or (child.atom is None and child.head() == 'hide') for child in effects.children):
+        effects.children.append(atom('hide'))
+
+def downgrade_pcb_footprint_fields(root, target=0):
     changed = 0
     for node in _walk(root):
         if node.head() not in {'footprint', 'module'}:
@@ -1240,8 +1666,7 @@ def downgrade_pcb_footprint_fields(root):
                 if name in {'Reference', 'Value'}:
                     kind = 'reference' if name == 'Reference' else 'value'
                     text = sexpr_list(atom('fp_text'), atom(kind), atom(child.atom_at(2), True))
-                    if _property_hidden(child):
-                        text.children.append(atom('hide'))
+                    hidden = _property_hidden(child)
                     for sub in child.children[3:]:
                         if sub.atom is None and sub.head() == 'hide':
                             continue
@@ -1253,6 +1678,11 @@ def downgrade_pcb_footprint_fields(root):
                             text.children.append(sub)
                         else:
                             text.children.append(sub)
+                    if hidden:
+                        if target <= 20171130:
+                            text.children.insert(3, atom('hide'))
+                        else:
+                            _append_fp_text_hide(text)
                     kept.append(text)
                     changed += 1
                     continue
@@ -1401,7 +1831,7 @@ def downgrade_pcb_user_layers_to_fixed(root):
         return 0
     changed = 0
     for node in _walk(root):
-        if node.head() == 'layers':
+        if node.head() == 'layers' and any(child.atom is None for child in node.children[1:]):
             kept = [node.children[0]] if node.children else []
             seen = set()
             for layer in node.children[1:]:
@@ -1827,6 +2257,19 @@ def downgrade_shape_fill_no_to_none(root):
                 changed += 1
     return changed
 
+def downgrade_kicad6_schematic_fill_colors(root):
+    changed = 0
+    for node in _walk(root):
+        if node.head() != 'fill':
+            continue
+        type_node = node.child_list('type')
+        if type_node and type_node.atom_at(1).lower() == 'color' and type_node.set_atom_at(1, 'background'):
+            changed += 1
+        before = len(node.children)
+        node.children = [c for c in node.children if c.atom is not None or c.head() != 'color']
+        changed += before - len(node.children)
+    return changed
+
 def downgrade_shape_hatch_fills(root):
     heads = {'gr_rect', 'gr_circle', 'gr_poly', 'fp_rect', 'fp_circle', 'fp_poly'}
     changed = 0
@@ -2217,6 +2660,7 @@ def apply_downgrade_rules(doc, target):
             _warn_if_changed(warnings, downgrade_bool_lists_to_atoms(root, {'hide'}), 'downgraded symbol library boolean hide fields')
             _warn_if_changed(warnings, flatten_child_lists_to_atoms_in_parents(root, {'pin_names', 'pin_numbers'}, {'hide'}), 'downgraded symbol pin visibility fields')
         _apply_when(warnings, target <= 20211014, lambda: remove_children_or_atoms_from_parents(root, {'pin'}, {'hide'}), 'removed KiCad 6-incompatible symbol pin hide fields')
+        _apply_when(warnings, target <= 20211014, lambda: downgrade_kicad6_schematic_fill_colors(root), 'downgraded symbol library fill colors for KiCad 6 parsers')
         if target < 20241209:
             _warn_if_changed(warnings, ensure_legacy_property_ids(root), 'added legacy symbol property ids')
             if target <= 20211014:
@@ -2253,14 +2697,17 @@ def apply_downgrade_rules(doc, target):
         _apply_when(warnings, target < 20240108, lambda: downgrade_font_style_lists_to_atoms(root), 'downgraded schematic font bold/italic bool fields')
         _queue_child_removal(child_removals, target <= 20250114, {'font'}, {'face'}, 'removed schematic font face fields')
         _apply_when(warnings, target <= 20230121, lambda: unquote_atoms_in_headed_lists(root, {'uuid'}, 1), 'normalized schematic UUID atoms for KiCad 6/7 parsers')
-        _apply_when(warnings, 20211123 < target <= 20230121, lambda: remove_placed_symbol_pin_uuid_blocks(root), 'removed KiCad 7 placed symbol pin UUID blocks')
+        _apply_when(warnings, target <= 20230121, lambda: remove_placed_symbol_pin_uuid_blocks(root), 'removed placed schematic symbol pin UUID blocks')
         _apply_when(warnings, target <= 20211123, lambda: ensure_legacy_schematic_symbol_instances(root), 'generated schematic symbol instance table for KiCad 6 parsers')
+        _apply_when(warnings, target <= 20211123, lambda: remove_direct_children_by_heads(root, {'rectangle', 'circle', 'arc', 'polyline', 'bezier'}), 'removed KiCad 6-incompatible schematic drawing primitives')
+        _apply_when(warnings, target <= 20211123, lambda: downgrade_kicad6_schematic_fill_colors(root), 'downgraded schematic fill colors for KiCad 6 parsers')
         _apply_when(warnings, target <= 20211123, lambda: ensure_kicad6_standard_property_ids(root), 'added KiCad 6 standard schematic property ids')
-        _apply_when(warnings, target <= 20211123, lambda: normalize_kicad6_sheet_properties(root), 'normalized KiCad 6 sheet property names and ids')
+        _apply_when(warnings, target <= 20230121, lambda: normalize_kicad6_sheet_properties(root), 'normalized KiCad 6/7 sheet property names and ids')
         _apply_when(warnings, target <= 20211123, lambda: remove_descendants_by_head(root, {'instances'}), 'removed schematic symbol instance data')
         if target < 20241209:
             _warn_if_changed(warnings, ensure_legacy_property_ids(root), 'added legacy schematic property ids')
             _warn_if_changed(warnings, move_property_hide_to_effects(root), 'moved schematic property hide flags to effects')
+        _apply_when(warnings, target <= 20230121, lambda: remove_direct_children_by_head(root, 'uuid'), 'removed schematic root UUID fields')
         _queue_child_removal(child_removals, target < 20231120, {'symbol', 'sheet'}, {'fields_autoplaced'}, 'removed schematic symbol/sheet fields_autoplaced fields')
         _queue_child_removal(child_removals, target < 20251028, {'property'}, {'show_name', 'do_not_autoplace'}, 'removed schematic property formatting fields')
         _apply_when(warnings, target < 20260306, lambda: remove_direct_children_by_head(root, 'group'), 'removed schematic group nodes')
@@ -2314,7 +2761,7 @@ def apply_downgrade_rules(doc, target):
         if target <= 20171130:
             _queue_child_removal(child_removals, True, {'footprint', 'module'}, {'group'}, 'removed footprint group metadata for KiCad 5')
             _queue_child_removal(child_removals, True, {'footprint', 'module'}, {'zone'}, 'removed footprint keepout zones for KiCad 5')
-        _apply_when(warnings, target < 20230620, lambda: downgrade_pcb_footprint_fields(root), 'downgraded PCB footprint fields to legacy storage')
+        _apply_when(warnings, target < 20230620, lambda: downgrade_pcb_footprint_fields(root, target), 'downgraded PCB footprint fields to legacy storage')
         if target < 20240225:
             _warn_if_changed(warnings, rename_child_head_in_parents(root, {'footprint', 'module', 'pad'}, 'solder_paste_margin_ratio', 'solder_paste_ratio'), 'renamed solder_paste_margin_ratio fields to legacy solder_paste_ratio')
         if target <= 20221018:
@@ -2339,13 +2786,11 @@ def apply_downgrade_rules(doc, target):
         _apply_when(warnings, target < 20250210, lambda: remove_atoms_from_headed_lists(root, {'layer'}, {'knockout'}), 'removed PCB layer knockout flags')
         _queue_child_removal(child_removals, target <= 20241229, {'font'}, {'face'}, 'removed PCB font face fields')
         if target <= 20221018:
-            child_value_rewrites.append(('presence-bool', None, {'free'}, 'downgraded free via fields'))
-        if target <= 20221018:
+            _warn_if_changed(warnings, remove_atoms_from_headed_lists(root, {'via'}, {'free'}), 'downgraded free via fields')
             _queue_child_removal(child_removals, True, {'pad', 'via'}, {'remove_unused_layers'}, 'removed pad/via remove_unused_layers fields')
+            _queue_child_removal(child_removals, True, {'via'}, {'free'}, 'removed free via fields for KiCad 5')
             _queue_child_removal(child_removals, True, {'pad', 'zone'}, {'thermal_bridge_angle'}, 'removed pad/zone thermal bridge angle fields')
         if target <= 20171130:
-            _warn_if_changed(warnings, remove_atoms_from_headed_lists(root, {'via'}, {'free'}), 'removed free via atoms for KiCad 5')
-            _queue_child_removal(child_removals, True, {'via'}, {'free'}, 'removed free via fields for KiCad 5')
             _queue_child_removal(child_removals, True, {'gr_circle', 'gr_poly', 'fp_circle', 'fp_poly'}, {'fill'}, 'removed PCB graphic fill fields for KiCad 5')
             _queue_child_removal(child_removals, True, {'pad'}, {'chamfer', 'chamfer_ratio', 'pinfunction', 'pintype', 'property', 'tstamp', 'uuid'}, 'removed pad fields for KiCad 5')
             _queue_child_removal(child_removals, True, {'model'}, {'opacity'}, 'removed 3D model opacity fields for KiCad 5')
@@ -2432,8 +2877,6 @@ def apply_upgrade_rules(doc, target):
         if target >= 20231231:
             warn(rename_child_head_in_parents(root, board_tstamp_parents, 'tstamp', 'uuid'), 'renamed PCB tstamp fields to uuid')
         warn(expand_font_style_atoms(root), 'upgraded PCB font style atoms to boolean lists')
-        if target >= 20230410:
-            warn(expand_presence_atoms_in_parents(root, {'attr'}, {'dnp'}), 'upgraded footprint dnp atoms to boolean lists')
         warn(normalize_bool_values(root, bool_heads), 'normalized PCB boolean values for KiCad 7 syntax')
         warn(remove_children_from_parents(root, {'footprint', 'module'}, {'tedit'}), 'removed obsolete footprint tedit fields during upgrade')
         if target >= 20251028:
@@ -2478,12 +2921,37 @@ def copy_project_tree(input_path, output_path, target):
         if target_major > 5 and ext == '.dcm' and path.with_suffix('.lib').exists():
             continue
         out = dest / rel
-        if is_kicad_document_path(path):
+        is_document = is_kicad_document_path(path)
+        report = None
+        if ext == '.kicad_dru':
+            doc = load_document(path)
+            try:
+                target_version = resolve_target_version('design-rules', target)
+            except ValueError:
+                report = _report(
+                    out,
+                    'design-rules',
+                    doc.version,
+                    'unsupported',
+                    False,
+                    ['skipped design-rules file because the target KiCad {} format does not support .kicad_dru'.format(target)],
+                )
+                copied.append(ProjectCopyEntry(path, out, False, report))
+                continue
+            if doc.version and doc.version != target_version:
+                raise ValueError(
+                    'design-rules conversion is not implemented for {} from version {} to {}'.format(
+                        path, doc.version, target_version
+                    )
+                )
+            report = _report(out, 'design-rules', doc.version, target_version, False)
+            is_document = False
+        if is_document:
             out = with_target_family_extension(out, target)
         out.parent.mkdir(parents=True, exist_ok=True)
-        if not is_kicad_document_path(path):
+        if not is_document:
             shutil.copy2(path, out)
-        copied.append((path, out))
+        copied.append(ProjectCopyEntry(path, out, is_document, report))
     return copied
 
 def _report(path, kind, source_version, target_version='', changed=False, warnings=None):
@@ -2881,6 +3349,15 @@ def _append_instance_uuid(prefix, uuid):
         return '/' + uuid
     return prefix + '/' + uuid
 
+def _path_join_uuid(path, uuid):
+    if not uuid:
+        return path or '/'
+    if not path or path == '/':
+        return '/' + uuid
+    if path.endswith('/' + uuid):
+        return path
+    return path.rstrip('/') + '/' + uuid
+
 def _normalize_legacy_sheet_path(path, root_uuid):
     if not path:
         return '/'
@@ -2911,6 +3388,20 @@ def _append_legacy_instance_uuid(sheet_path, uuid):
 def _sheet_instance_node(path, page):
     return sexpr_list(atom('path'), atom(path, True), sexpr_list(atom('page'), atom(page or '1', True)))
 
+def _sync_sheet_local_instances(sheet, project_name, path, page):
+    new_instances = sexpr_list(
+        atom('instances'),
+        sexpr_list(atom('project'), atom(project_name, True), _sheet_instance_node(path, page)),
+    )
+    old_instances = sheet.child_list('instances')
+    old_text = format_sexpr(old_instances).strip() if old_instances else ''
+    new_text = format_sexpr(new_instances).strip()
+    if old_text == new_text:
+        return False
+    sheet.children = [child for child in sheet.children if child.atom is not None or child.head() != 'instances']
+    sheet.children.append(new_instances)
+    return True
+
 def _first_project_instance_path(node):
     instances = node.child_list('instances') if node else None
     if not instances:
@@ -2922,6 +3413,12 @@ def _first_project_instance_path(node):
             if child.atom is None and child.head() == 'path':
                 return child
     return None
+
+def _instance_path_without_first_component(path):
+    parts = [part for part in (path or '').split('/') if part]
+    if len(parts) < 2:
+        return ''
+    return '/' + '/'.join(parts[1:])
 
 def _normalized_hidden_instance_reference(reference, value):
     if len(reference) < 3 or not reference.startswith('#U'):
@@ -2936,16 +3433,36 @@ def _normalized_hidden_instance_reference(reference, value):
         return '#PWR' + suffix
     return reference
 
+def _reference_is_annotated(reference):
+    return bool(reference) and '?' not in reference and any(ch.isdigit() for ch in reference)
+
+def _resolved_symbol_reference(symbol, source_path=None):
+    value = _child_atom_or_empty(source_path, 'value') if source_path else ''
+    value = value or _property_value(symbol, 'Value')
+    reference = _child_atom_or_empty(source_path, 'reference') if source_path else ''
+    property_reference = _property_value(symbol, 'Reference')
+    if not reference or '?' in reference or (not _reference_is_annotated(reference) and _reference_is_annotated(property_reference)):
+        reference = property_reference
+    return _normalized_hidden_instance_reference(reference, value)
+
+def _set_symbol_reference_property(symbol, reference):
+    if not _reference_is_annotated(reference):
+        return False
+    for child in symbol.children:
+        if child.atom is None and child.head() == 'property' and child.atom_at(1) == 'Reference':
+            if child.atom_at(2) == reference:
+                return False
+            return child.set_atom_at(2, reference, True)
+    return False
+
 def _symbol_instance_node(path, symbol, source_path=None):
     unit = _child_atom_or_empty(source_path, 'unit') if source_path else ''
     value = _child_atom_or_empty(source_path, 'value') if source_path else ''
     footprint = _child_atom_or_empty(source_path, 'footprint') if source_path else ''
-    reference = _child_atom_or_empty(source_path, 'reference') if source_path else ''
     unit = unit or _child_atom_or_empty(symbol, 'unit') or '1'
     value = value or _property_value(symbol, 'Value')
     footprint = footprint or _property_value(symbol, 'Footprint')
-    reference = reference or _property_value(symbol, 'Reference')
-    reference = _normalized_hidden_instance_reference(reference, value)
+    reference = _resolved_symbol_reference(symbol, source_path)
     return sexpr_list(
         atom('path'),
         atom(path, True),
@@ -2954,6 +3471,38 @@ def _symbol_instance_node(path, symbol, source_path=None):
         sexpr_list(atom('value'), atom(value, True)),
         sexpr_list(atom('footprint'), atom(footprint, True)),
     )
+
+def _symbol_local_instance_node(path, symbol, source_path=None):
+    unit = _child_atom_or_empty(source_path, 'unit') if source_path else ''
+    unit = unit or _child_atom_or_empty(symbol, 'unit') or '1'
+    reference = _resolved_symbol_reference(symbol, source_path)
+    return sexpr_list(
+        atom('path'),
+        atom(path, True),
+        sexpr_list(atom('reference'), atom(reference, True)),
+        sexpr_list(atom('unit'), atom(unit)),
+    )
+
+def _sync_symbol_local_instances(symbol, project_name, path, source_path=None):
+    source_path = source_path or _first_project_instance_path(symbol)
+    changed = _set_symbol_reference_property(symbol, _resolved_symbol_reference(symbol, source_path))
+    if not project_name:
+        old_instances = symbol.child_list('instances')
+        if old_instances:
+            symbol.children = [child for child in symbol.children if child.atom is not None or child.head() != 'instances']
+            return True
+        return changed
+    new_instances = sexpr_list(
+        atom('instances'),
+        sexpr_list(atom('project'), atom(project_name, True), _symbol_local_instance_node(path, symbol, source_path)),
+    )
+    old_text = format_sexpr(symbol.child_list('instances')).strip() if symbol.child_list('instances') else ''
+    new_text = format_sexpr(new_instances).strip()
+    if old_text == new_text:
+        return changed
+    symbol.children = [child for child in symbol.children if child.atom is not None or child.head() != 'instances']
+    symbol.children.append(new_instances)
+    return True
 
 def _existing_sheet_instance_pages(root):
     pages = {}
@@ -2988,6 +3537,9 @@ def _collect_existing_symbol_instances(root, build):
         path = child.atom_at(1)
         if path and path not in build['existing_symbols']:
             build['existing_symbols'][path] = _clone_node(child)
+        suffix_path = _instance_path_without_first_component(path)
+        if suffix_path and suffix_path not in build['existing_symbols_by_suffix']:
+            build['existing_symbols_by_suffix'][suffix_path] = _clone_node(child)
 
 def _sheet_file_property_value(sheet):
     return _property_value(sheet, 'Sheet file') or _property_value(sheet, 'Sheetfile')
@@ -3037,7 +3589,8 @@ def _has_top_level_sheet(root):
             return True
     return False
 
-def _collect_kicad6_hierarchy_instances(path, root, prefix, build):
+def _collect_kicad6_hierarchy_instances(path, root, symbol_prefix, local_prefix, build, is_root=False):
+    changed = False
     _collect_existing_symbol_instances(root, build)
     for child in root.children:
         if child.atom is not None or child.head() != 'symbol' or not child.child_list('lib_id'):
@@ -3045,26 +3598,30 @@ def _collect_kicad6_hierarchy_instances(path, root, prefix, build):
         uuid = _child_atom_or_empty(child, 'uuid') or _child_atom_or_empty(child, 'tstamp')
         if not uuid:
             continue
-        instance_path = _append_instance_uuid(prefix, uuid)
-        existing = build['existing_symbols'].get(instance_path)
-        if existing:
-            build['symbol_instances'].children.append(_clone_node(existing))
-        else:
-            build['symbol_instances'].children.append(_symbol_instance_node(instance_path, child))
+        instance_path = _append_instance_uuid(symbol_prefix, uuid)
+        source_path = _first_project_instance_path(child)
+        existing = build['existing_symbols'].get(instance_path) or build['existing_symbols_by_suffix'].get(instance_path)
+        resolved_path = existing or source_path
+        changed = _sync_symbol_local_instances(child, build['symbol_project_name'], local_prefix or '/', resolved_path) or changed
+        build['symbol_instances'].children.append(_symbol_instance_node(instance_path, child, existing or source_path))
     for child in root.children:
         if child.atom is not None or child.head() != 'sheet':
             continue
         uuid = _child_atom_or_empty(child, 'uuid') or _child_atom_or_empty(child, 'tstamp')
         if not uuid:
             continue
-        sheet_path = _append_instance_uuid(prefix, uuid)
+        sheet_path = _append_instance_uuid(symbol_prefix, uuid)
+        sheet_local_path = sheet_path if build.get('local_paths_use_sheet_prefix') else (local_prefix or '/')
+        page = build['sheet_pages'].get(sheet_path) or build['existing_pages'].get(sheet_path)
         if sheet_path not in build['added_sheet_paths']:
-            page = build['existing_pages'].get(sheet_path)
             if not page:
                 page = str(build['next_page'])
                 build['next_page'] += 1
+            build['sheet_pages'][sheet_path] = page
             build['sheet_instances'].children.append(_sheet_instance_node(sheet_path, page))
             build['added_sheet_paths'].add(sheet_path)
+        if page:
+            changed = _sync_sheet_local_instances(child, build['project_name'], sheet_local_path, page) or changed
         sheet_file = _sheet_file_property_value(child)
         if not sheet_file:
             continue
@@ -3079,8 +3636,14 @@ def _collect_kicad6_hierarchy_instances(path, root, prefix, build):
         except Exception:
             continue
         build['active_files'].add(active_key)
-        _collect_kicad6_hierarchy_instances(child_path, child_root, sheet_path, build)
+        child_local_prefix = _path_join_uuid(local_prefix or '/', uuid)
+        child_changed = _collect_kicad6_hierarchy_instances(child_path, child_root, sheet_path, child_local_prefix, build, False)
+        if not build.get('rebuild_root_tables'):
+            child_changed = _trim_modern_child_instances(child_root) or child_changed
         build['active_files'].remove(active_key)
+        if child_changed:
+            _write_text(child_path, format_sexpr(child_root))
+    return changed
 
 def _replace_root_instances(root, build):
     _uniquify_repeated_symbol_instance_references(build['symbol_instances'])
@@ -3093,7 +3656,40 @@ def _replace_root_instances(root, build):
     kept.append(build['symbol_instances'])
     root.children = kept
 
-def rebuild_kicad6_hierarchy_instances(root_schematic):
+def _trim_modern_root_instances(root):
+    changed = False
+    kept = []
+    sheet_instances = None
+    for child in root.children:
+        if child.atom is None and child.head() == 'symbol_instances':
+            changed = True
+            continue
+        if child.atom is None and child.head() == 'sheet_instances':
+            if sheet_instances is None:
+                sheet_instances = sexpr_list(atom('sheet_instances'), _sheet_instance_node('/', '1'))
+            changed = changed or format_sexpr(child).strip() != format_sexpr(sheet_instances).strip()
+            continue
+        kept.append(child)
+    if sheet_instances is None:
+        sheet_instances = sexpr_list(atom('sheet_instances'), _sheet_instance_node('/', '1'))
+        changed = True
+    kept.append(sheet_instances)
+    root.children = kept
+    return changed
+
+def _trim_modern_child_instances(root):
+    kept = []
+    changed = False
+    for child in root.children:
+        if child.atom is None and child.head() in {'sheet_instances', 'symbol_instances'}:
+            changed = True
+            continue
+        kept.append(child)
+    if changed:
+        root.children = kept
+    return changed
+
+def rebuild_kicad6_hierarchy_instances(root_schematic, rebuild_root_tables=True):
     try:
         text = root_schematic.read_text(encoding='utf-8-sig')
         root = parse_sexpr(text)
@@ -3102,25 +3698,37 @@ def rebuild_kicad6_hierarchy_instances(root_schematic):
     if root.head() != 'kicad_sch' or not root.child_list('sheet_instances') or not _has_top_level_sheet(root):
         return False
     existing_pages = _existing_sheet_instance_pages(root)
+    root_uuid = _child_atom_or_empty(root, 'uuid')
+    root_local_path = '/' + root_uuid if root_uuid else '/'
     build = {
         'sheet_instances': sexpr_list(atom('sheet_instances')),
         'symbol_instances': sexpr_list(atom('symbol_instances')),
         'existing_pages': existing_pages,
         'existing_symbols': {},
+        'existing_symbols_by_suffix': {},
+        'project_name': root_schematic.stem,
+        'symbol_project_name': root_schematic.stem if rebuild_root_tables else '',
+        'sheet_pages': {'/': '1'},
+        'rebuild_root_tables': rebuild_root_tables,
         'added_sheet_paths': set(['/']),
         'active_files': set([str(root_schematic.resolve())]),
         'next_page': _next_sheet_page(existing_pages),
     }
     build['sheet_instances'].children.append(_sheet_instance_node('/', '1'))
-    _collect_kicad6_hierarchy_instances(root_schematic, root, '', build)
-    _replace_root_instances(root, build)
-    _write_text(root_schematic, format_sexpr(root))
-    return True
+    changed = _collect_kicad6_hierarchy_instances(root_schematic, root, '', root_local_path, build, True)
+    if rebuild_root_tables:
+        _replace_root_instances(root, build)
+        changed = True
+    else:
+        changed = _trim_modern_root_instances(root) or changed
+    if changed:
+        _write_text(root_schematic, format_sexpr(root))
+    return changed
 
-def rebuild_kicad6_project_hierarchy_instances(copied):
+def rebuild_kicad6_project_hierarchy_instances(copied, rebuild_root_tables=True):
     changed = 0
     for _src, out in copied:
-        if out.suffix.lower() == '.kicad_sch' and rebuild_kicad6_hierarchy_instances(out):
+        if out.suffix.lower() == '.kicad_sch' and rebuild_kicad6_hierarchy_instances(out, rebuild_root_tables):
             changed += 1
     return changed
 
@@ -4489,9 +5097,25 @@ def _project_json_to_legacy_text(doc):
     if not libraries:
         libraries = _local_symbol_library_stems(doc.path.parent)
     lines = []
+    legacy_version = settings.get('version', LEGACY_PROJECT_SETTING_DEFAULTS['version'])
+    lines.append('update=' + settings.get('update', LEGACY_PROJECT_SETTING_DEFAULTS['update']))
+    lines.append('version=' + legacy_version)
+    lines.append('last_client=' + settings.get('last_client', LEGACY_PROJECT_SETTING_DEFAULTS['last_client']))
+    lines.append('')
+    lines.append('[general]')
+    lines.append('version=1')
+    lines.append('RootSch=' + doc.path.stem + '.sch')
+    lines.append('BoardNm=' + doc.path.stem + '.kicad_pcb')
+    lines.append('')
+    lines.append('[eeschema]')
+    lines.append('version=1')
     for key in LEGACY_PROJECT_SETTING_ORDER:
+        if key in {'update', 'version', 'last_client'}:
+            continue
         value = settings.get(key, LEGACY_PROJECT_SETTING_DEFAULTS[key])
         lines.append(key + '=' + value)
+    lines.append('')
+    lines.append('[eeschema/libraries]')
     for index, library in enumerate(libraries, 1):
         lines.append('LibName{}={}'.format(index, library))
     warnings = ['converted project JSON to minimal legacy .pro settings']
@@ -4517,10 +5141,26 @@ def convert_legacy_to_sexpr_text(doc, target_version, target_kind):
 def _legacy_quote(value):
     out = '"'
     for ch in value:
+        if ch == '\r':
+            continue
+        if ch == '\n':
+            out += '\\n'
+            continue
         if ch == '\\' or ch == '"':
             out += '\\'
         out += ch
     return out + '"'
+
+def _legacy_text_line(value):
+    out = []
+    for ch in value:
+        if ch == '\r':
+            continue
+        if ch == '\n':
+            out.append('\\n')
+        else:
+            out.append(ch)
+    return ''.join(out)
 
 def _mm_to_legacy_coord(value):
     parsed = _to_float(value)
@@ -4926,7 +5566,7 @@ def _sexpr_symbol_library_to_legacy(doc, target_major, warnings):
         if _child_atom_or_empty(symbol, 'extends'):
             continue
         name = _sanitize_symbol_name(symbol.atom_at(1))
-        reference = _property_value(symbol, 'Reference') or _library_reference_prefix(name)
+        reference = _legacy_library_reference_prefix(_property_value(symbol, 'Reference'), name)
         show_pin_numbers = _symbol_pin_visibility_flag(symbol, 'pin_numbers')
         show_pin_names = _symbol_pin_visibility_flag(symbol, 'pin_names')
         unit_count = _symbol_legacy_unit_count(symbol)
@@ -5393,7 +6033,7 @@ def _sexpr_schematic_to_legacy(doc, target_major, warnings):
             if legacy_type in {'GLabel', 'HLabel'}:
                 line += ' ' + _sexpr_label_shape_to_legacy(_child_atom_or_empty(child, 'shape'))
             lines.append(line + ' ~ 0')
-            lines.append(child.atom_at(1))
+            lines.append(_legacy_text_line(child.atom_at(1)))
             counts['labels'] += 1
             if head == 'text_box':
                 size = child.child_list('size')
@@ -5569,6 +6209,26 @@ def normalize_file(input_path, output_path, target):
         if dcm_text is not None:
             _write_text(output_path.with_suffix('.dcm'), dcm_text)
         return report
+    if doc.kind == 'design-rules':
+        try:
+            resolved = resolve_target_version(doc.kind, target)
+        except ValueError:
+            report.target_version = 'unsupported'
+            report.warnings.append(
+                'skipped design-rules file because the target KiCad {} format does not support .kicad_dru'.format(target)
+            )
+            return report
+        if doc.version and doc.version != resolved:
+            raise ValueError(
+                'design-rules conversion is not implemented for {} from version {} to {}'.format(
+                    input_path, doc.version, resolved
+                )
+            )
+        if input_path.resolve() != output_path.resolve():
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(input_path, output_path)
+        report.target_version = resolved
+        return report
     if doc.kind == 'project':
         if input_path.resolve() != output_path.resolve():
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5587,7 +6247,9 @@ def normalize_file(input_path, output_path, target):
     if source and source < target_int:
         report.warnings = apply_upgrade_rules(doc, target_int)
     else:
-        report.warnings = apply_downgrade_rules(doc, target_int)
+        if source and source > target_int and doc.kind in {'board', 'footprint'}:
+            report.warnings.extend(externalize_embedded_models_for_legacy_targets(doc, output_path))
+        report.warnings.extend(apply_downgrade_rules(doc, target_int))
     ensure_version(doc, resolved)
     report.target_version = doc.version
     report.changed = True
@@ -5699,6 +6361,98 @@ def ensure_legacy_project_local_settings(path, suffix, source_path=None):
     payload['board']['visible_layers'] = visible_layers
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
+def clear_legacy_embedded_page_layout_refs(text):
+    try:
+        data = json.loads(text) if text.strip() else {}
+    except Exception:
+        return text, 0
+    changed = 0
+
+    def visit(value):
+        nonlocal changed
+        if isinstance(value, dict):
+            for key, child in list(value.items()):
+                if key == 'page_layout_descr_file' and isinstance(child, str):
+                    if child.startswith('kicad-embed://') and child.lower().endswith('.kicad_wks'):
+                        value[key] = ''
+                        changed += 1
+                else:
+                    visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(data)
+    if not changed:
+        return text, 0
+    return json.dumps(data, ensure_ascii=False, indent=2) + '\n', changed
+
+def ensure_legacy_project_page_layout_refs(path, suffix):
+    report = _report(path, 'project', 'kicad-project-json', 'kicad-project-json')
+    if suffix not in {'V6', 'V7', 'V8'} or path.suffix.lower() != '.kicad_pro' or not path.exists():
+        return report
+    text = path.read_text(encoding='utf-8-sig')
+    rewritten, changed = clear_legacy_embedded_page_layout_refs(text)
+    if changed:
+        _write_text(path, rewritten)
+        report.changed = True
+        report.warnings.append(
+            'cleared embedded worksheet page layout references for KiCad {} project compatibility'.format(
+                suffix[1:]
+            )
+        )
+    return report
+
+def ensure_legacy_schematic_library_line(path, library):
+    text = path.read_text(encoding='utf-8-sig')
+    line = 'LIBS:' + library
+    if line + '\n' in text or line + '\r\n' in text:
+        return 0
+    insert_at = None
+    pos = 0
+    while pos < len(text):
+        line_end = text.find('\n', pos)
+        next_pos = len(text) if line_end < 0 else line_end + 1
+        current = text[pos:len(text) if line_end < 0 else line_end].rstrip('\r')
+        if current.startswith('LIBS:'):
+            insert_at = next_pos
+        elif insert_at is not None:
+            break
+        if line_end < 0:
+            break
+        pos = next_pos
+    if insert_at is None:
+        header_end = text.find('\n')
+        insert_at = len(text) if header_end < 0 else header_end + 1
+    _write_text(path, text[:insert_at] + line + '\n' + text[insert_at:])
+    return 1
+
+def ensure_legacy_schematic_cache_library(project_dir, copied):
+    report = _report(project_dir, 'legacy-symbol-library', 'legacy-lib', 'legacy-lib')
+    project_path = None
+    for _src_path, path in copied:
+        if path.suffix.lower() == '.pro' and path.parent == project_dir:
+            project_path = path
+            break
+    if project_path is None:
+        return report
+    library_path = project_dir / 'Library.lib'
+    if not library_path.exists():
+        return report
+    cache_name = project_path.stem + '-cache'
+    cache_path = project_dir / (cache_name + '.lib')
+    shutil.copy2(library_path, cache_path)
+    report.path = str(cache_path)
+    report.changed = True
+    report.warnings.append('created legacy schematic cache library {}'.format(cache_path.name))
+    schematic_changes = 0
+    for path in project_dir.iterdir():
+        if path.is_file() and path.suffix.lower() == '.sch':
+            schematic_changes += ensure_legacy_schematic_library_line(path, cache_name)
+    if schematic_changes:
+        report.warnings.append('added legacy schematic cache library references')
+    return report
+
 def _replace_extension(path, suffix):
     return path.with_suffix(suffix)
 
@@ -5714,11 +6468,15 @@ def convert(input_path, output_path, target, report_path=None):
     if input_p.is_dir() or input_p.suffix.lower() in {'.kicad_pro', '.pro'}:
         src_dir = input_p if input_p.is_dir() else input_p.parent
         copied = copy_project_tree(src_dir, output_p, target)
-        for src_path, path in copied:
-            if is_kicad_document_path(src_path):
-                report = normalize_file(src_path, path, target)
+        for entry in copied:
+            if entry.report is not None:
+                reports.append(entry.report)
+                stderr_lines.extend((f'warning: {entry.report.path}: {warning}' for warning in entry.report.warnings))
+        for entry in copied:
+            if entry.is_document:
+                report = normalize_file(entry.source, entry.output, target)
                 reports.append(report)
-                stderr_lines.extend((f'warning: {path}: {warning}' for warning in report.warnings))
+                stderr_lines.extend((f'warning: {entry.output}: {warning}' for warning in report.warnings))
         suffix = target_version_suffix(target)
         if suffix in {'V6', 'V7', 'V8'}:
             for src_path, path in copied:
@@ -5728,6 +6486,11 @@ def convert(input_path, output_path, target, report_path=None):
                         suffix,
                         _replace_extension(src_path, '.kicad_prl'),
                     )
+                elif path.suffix.lower() == '.kicad_pro':
+                    project_report = ensure_legacy_project_page_layout_refs(path, suffix)
+                    if project_report.changed or project_report.warnings:
+                        reports.append(project_report)
+                        stderr_lines.extend((f'warning: {project_report.path}: {warning}' for warning in project_report.warnings))
         target_major = target_major_version(target)
         if target_major <= 6:
             table_reports = normalize_project_library_tables(copied, target_major)
@@ -5735,15 +6498,21 @@ def convert(input_path, output_path, target, report_path=None):
             for table_report in table_reports:
                 stderr_lines.extend((f'warning: {table_report.path}: {warning}' for warning in table_report.warnings))
         if target_major > 5:
-            rebuilt = rebuild_kicad6_project_hierarchy_instances(copied)
+            rebuild_root_tables = target_major <= 7
+            rebuilt = rebuild_kicad6_project_hierarchy_instances(copied, rebuild_root_tables)
             if rebuilt:
+                hierarchy_message = (
+                    'rebuilt KiCad 6/7 schematic sheet/symbol hierarchy instances in {} file(s)'
+                    if rebuild_root_tables
+                    else 'normalized KiCad 8+ schematic local sheet/symbol instances in {} file(s)'
+                )
                 hierarchy_report = _report(
                     output_p,
                     'schematic-hierarchy',
                     'project-local',
                     'modern-compatible',
                     True,
-                    ['rebuilt KiCad 6+ schematic sheet/symbol hierarchy instances in {} file(s)'.format(rebuilt)],
+                    [hierarchy_message.format(rebuilt)],
                 )
                 reports.append(hierarchy_report)
                 stderr_lines.extend((f'warning: {hierarchy_report.path}: {warning}' for warning in hierarchy_report.warnings))
@@ -5761,6 +6530,16 @@ def convert(input_path, output_path, target, report_path=None):
                 table_report.warnings.extend(embed_warnings)
                 reports.append(table_report)
                 stderr_lines.extend((f'warning: {table_report.path}: {warning}' for warning in table_report.warnings))
+        if target_major <= 5:
+            project_dirs = set()
+            for _src_path, path in copied:
+                if path.suffix.lower() == '.pro':
+                    project_dirs.add(path.parent)
+            for project_dir in sorted(project_dirs):
+                cache_report = ensure_legacy_schematic_cache_library(project_dir, copied)
+                if cache_report.changed or cache_report.warnings:
+                    reports.append(cache_report)
+                    stderr_lines.extend((f'warning: {cache_report.path}: {warning}' for warning in cache_report.warnings))
     else:
         if input_p.resolve() == output_p.resolve():
             raise ValueError('output file must differ from input file')

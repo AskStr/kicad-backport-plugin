@@ -10,7 +10,7 @@ import re
 import glob
 from pathlib import Path
 from typing import Callable, Iterable, Optional
-VERSION = '0.4.3'
+VERSION = '0.4.4'
 ESCAPES = {'n': '\n', 't': '\t', '"': '"', '\\': '\\'}
 
 class Node:
@@ -757,13 +757,287 @@ def _transform_dimension_text_to_footprint_local(text, transform):
     elif local_angle:
         at.children.append(atom(_format_float(local_angle)))
 
+def _remove_direct_children(node, heads):
+    kept = []
+    removed = 0
+    for child in node.children:
+        if child.atom is None and child.head() in heads:
+            removed += 1
+            continue
+        kept.append(child)
+    node.children = kept
+    return removed
+
+def _ellipse_polyline_points(node):
+    center = node.child_list('center')
+    major = node.child_list('major_radius')
+    minor = node.child_list('minor_radius')
+    rotation = node.child_list('rotation_angle')
+    if not center or not major or not minor:
+        return None
+    cx = _to_float(center.atom_at(1))
+    cy = _to_float(center.atom_at(2))
+    rx = _to_float(major.atom_at(1))
+    ry = _to_float(minor.atom_at(1))
+    angle = _to_float(rotation.atom_at(1)) if rotation else 0.0
+    if None in {cx, cy, rx, ry, angle} or rx <= 0 or ry <= 0:
+        return None
+    is_arc = node.head().endswith('_arc')
+    start = node.child_list('start_angle')
+    end = node.child_list('end_angle')
+    if is_arc:
+        start_angle = _to_float(start.atom_at(1)) if start else None
+        end_angle = _to_float(end.atom_at(1)) if end else None
+        if start_angle is None or end_angle is None:
+            return None
+        sweep = math.fmod(end_angle - start_angle, 360.0)
+        if sweep <= 0:
+            sweep += 360.0
+        if abs(sweep) < 5e-10:
+            sweep = 360.0
+        segments = max(4, int(math.ceil(sweep / 360.0 * 32.0)))
+    else:
+        start_angle = 0.0
+        sweep = 360.0
+        segments = 32
+    rotation_radians = math.radians(angle)
+    points = []
+    point_count = segments + 1
+    for index in range(point_count):
+        theta = math.radians(start_angle + sweep * index / segments)
+        x = rx * math.cos(theta)
+        y = ry * math.sin(theta)
+        points.append((
+            cx + x * math.cos(rotation_radians) - y * math.sin(rotation_radians),
+            cy + x * math.sin(rotation_radians) + y * math.cos(rotation_radians),
+        ))
+    return points
+
+def _replace_ellipse_with_polyline(node, replacement_head):
+    points = _ellipse_polyline_points(node)
+    if not points:
+        return False
+    geometry_heads = {'center', 'major_radius', 'minor_radius', 'rotation_angle', 'start_angle', 'end_angle'}
+    retained = []
+    for child in node.children:
+        if child.atom is None and child.head() in geometry_heads:
+            continue
+        retained.append(child)
+    retained[0].atom = replacement_head
+    pts = sexpr_list(atom('pts'))
+    for x, y in points:
+        pts.children.append(sexpr_list(atom('xy'), atom(_format_float(x)), atom(_format_float(y))))
+    retained.insert(1, pts)
+    node.children = retained
+    return True
+
+def downgrade_native_ellipses(root, kind):
+    replacement_heads = {
+        'symbol-library': {'ellipse': 'polyline', 'ellipse_arc': 'polyline'},
+        'schematic': {'ellipse': 'polyline', 'ellipse_arc': 'polyline'},
+        'board': {'gr_ellipse': 'gr_poly', 'gr_ellipse_arc': 'gr_poly', 'fp_ellipse': 'fp_poly', 'fp_ellipse_arc': 'fp_poly'},
+        'footprint': {'gr_ellipse': 'gr_poly', 'gr_ellipse_arc': 'gr_poly', 'fp_ellipse': 'fp_poly', 'fp_ellipse_arc': 'fp_poly'},
+    }.get(kind, {})
+    if not replacement_heads or root.atom is not None:
+        return 0
+    converted = 0
+
+    def visit(node):
+        nonlocal converted
+        for child in node.children:
+            if child.atom is not None:
+                continue
+            replacement = replacement_heads.get(child.head())
+            if replacement and _replace_ellipse_with_polyline(child, replacement):
+                converted += 1
+            visit(child)
+    visit(root)
+    return converted
+
+def _png_ppi_from_image_data(node):
+    data = node.child_list('data')
+    if not data:
+        return None
+    encoded = ''.join(child.atom for child in data.children[1:] if child.atom is not None)
+    if not encoded:
+        return None
+    try:
+        binary = base64.b64decode(encoded, validate=True)
+    except Exception:
+        return None
+    if binary[:8] != b'\x89PNG\r\n\x1a\n':
+        return None
+    position = 8
+    while position + 12 <= len(binary):
+        length = int.from_bytes(binary[position:position + 4], 'big')
+        chunk_end = position + 12 + length
+        if chunk_end > len(binary):
+            return None
+        chunk_type = binary[position + 4:position + 8]
+        chunk_data = binary[position + 8:position + 8 + length]
+        if chunk_type == b'pHYs' and len(chunk_data) == 9 and chunk_data[8] == 1:
+            pixels_per_meter = int.from_bytes(chunk_data[:4], 'big')
+            pixels_per_cm = pixels_per_meter / 100.0
+            if pixels_per_cm <= 1.0:
+                return None
+            ppi = int(math.floor(pixels_per_cm * 2.54 + 0.5))
+            legacy_ppi = int(math.floor(math.floor(pixels_per_cm) * 2.54 + 0.5))
+            if ppi > 0 and legacy_ppi > 0:
+                return (ppi, legacy_ppi)
+            return None
+        position = chunk_end
+    return None
+
+def _image_scale(node):
+    scale = node.child_list('scale')
+    if not scale:
+        return 1.0
+    value = _to_float(scale.atom_at(1))
+    return value if value is not None and math.isfinite(value) and value != 0 else 1.0
+
+def _set_image_scale(node, value):
+    scale = node.child_list('scale')
+    if abs(value - 1.0) < 5e-10:
+        if scale:
+            _remove_direct_children(node, {'scale'})
+            return 1
+        return 0
+    if scale:
+        if scale.set_atom_at(1, _format_float(value)):
+            return 1
+        return 0
+    node.children.append(sexpr_list(atom('scale'), atom(_format_float(value))))
+    return 1
+
+def migrate_reference_image_scales(root, kind, source, target):
+    if source <= 0 or source == target or root.atom is not None:
+        return (0, 0)
+    if source >= 20260623 and target < 20260623:
+        direction = 'downgrade'
+    elif source < 20260623 and target >= 20260623:
+        direction = 'upgrade'
+    else:
+        return (0, 0)
+    changed = 0
+    unavailable = 0
+
+    def visit(node):
+        nonlocal changed, unavailable
+        for child in node.children:
+            if child.atom is None:
+                if child.head() == 'image':
+                    ppi = _png_ppi_from_image_data(child)
+                    if not ppi:
+                        unavailable += 1
+                    else:
+                        current = _image_scale(child)
+                        actual_ppi, legacy_ppi = ppi
+                        if direction == 'downgrade':
+                            if kind == 'schematic' and target <= 20230121:
+                                converted = current * 300.0 / actual_ppi
+                            else:
+                                converted = current * legacy_ppi / actual_ppi
+                        elif kind == 'schematic' and source <= 20230121:
+                            converted = current * actual_ppi / 300.0
+                        else:
+                            converted = current * actual_ppi / legacy_ppi
+                        changed += _set_image_scale(child, converted)
+                visit(child)
+    visit(root)
+    return (changed, unavailable)
+
+def _transform_values(node):
+    translate = node.child_list('translate')
+    rotate = node.child_list('rotate')
+    scale = node.child_list('scale')
+    x = _to_float(translate.atom_at(1)) if translate else 0.0
+    y = _to_float(translate.atom_at(2)) if translate else 0.0
+    angle = _to_float(rotate.atom_at(1)) if rotate else 0.0
+    sx = _to_float(scale.atom_at(1)) if scale else 1.0
+    sy = _to_float(scale.atom_at(2)) if scale else 1.0
+    if None in {x, y, angle, sx, sy} or sx == 0 or sy == 0:
+        return None
+    return (x, y, angle, sx, sy)
+
+def _scale_atoms(node, factors):
+    changed = 0
+    for index, factor in factors:
+        value = _to_float(node.atom_at(index))
+        if value is None:
+            continue
+        node.set_atom_at(index, _format_float(value * factor))
+        changed += 1
+    return changed
+
+def _bake_footprint_geometry(node, scale_x, scale_y):
+    average_scale = (abs(scale_x) + abs(scale_y)) * 0.5
+    xy_heads = {'at', 'start', 'end', 'mid', 'center', 'position', 'xy'}
+    size_heads = {'size', 'drill'}
+    scalar_heads = {'width', 'thickness', 'radius', 'major_radius', 'minor_radius', 'clearance', 'thermal_gap', 'thermal_bridge_width', 'solder_mask_margin', 'solder_paste_margin', 'die_length', 'extension_height', 'arrow_length'}
+    changed = 0
+
+    def visit(current):
+        nonlocal changed
+        for child in current.children:
+            if child.atom is not None:
+                continue
+            head = child.head()
+            if head in xy_heads:
+                changed += _scale_atoms(child, ((1, scale_x), (2, scale_y)))
+            elif head in size_heads:
+                changed += _scale_atoms(child, ((1, scale_x), (2, scale_y)))
+            elif head == 'xyz':
+                changed += _scale_atoms(child, ((1, scale_x), (2, scale_y), (3, average_scale)))
+            elif head in scalar_heads:
+                changed += _scale_atoms(child, ((1, average_scale),))
+            visit(child)
+    visit(node)
+    return changed
+
+def bake_footprint_transforms(root):
+    if root.atom is not None:
+        return (0, 0)
+    baked = 0
+    non_uniform = 0
+
+    def bake(node):
+        nonlocal baked, non_uniform
+        transform = node.child_list('transform')
+        values = _transform_values(transform) if transform else None
+        if not transform or not values:
+            return
+        x, y, angle, scale_x, scale_y = values
+        _remove_direct_children(node, {'at', 'transform'})
+        _bake_footprint_geometry(node, scale_x, scale_y)
+        at = sexpr_list(atom('at'), atom(_format_float(x)), atom(_format_float(y)))
+        if angle:
+            at.children.append(atom(_format_float(angle)))
+        insert_at = 1
+        while insert_at < len(node.children) and node.children[insert_at].atom is not None:
+            insert_at += 1
+        node.children.insert(insert_at, at)
+        baked += 1
+        if abs(abs(scale_x) - abs(scale_y)) > 5e-10:
+            non_uniform += 1
+
+    def visit(node):
+        if node.head() in {'footprint', 'module'}:
+            bake(node)
+        for child in node.children:
+            if child.atom is None:
+                visit(child)
+    visit(root)
+    return (baked, non_uniform)
+
 def detect_kind(path, top_level):
     by_head = {'kicad_symbol_lib': 'symbol-library', 'kicad_sch': 'schematic', 'kicad_pcb': 'board', 'footprint': 'footprint', 'kicad_dru': 'design-rules', 'kicad_wks': 'worksheet', 'drawing_sheet': 'worksheet'}
     if top_level in by_head:
         return by_head[top_level]
     return {'.pro': 'legacy-project', '.sch': 'legacy-schematic', '.lib': 'legacy-symbol-library', '.dcm': 'legacy-symbol-documentation', '.kicad_pro': 'project', '.kicad_sym': 'symbol-library', '.kicad_sch': 'schematic', '.kicad_pcb': 'board', '.kicad_mod': 'footprint', '.kicad_dru': 'design-rules', '.kicad_wks': 'worksheet'}.get(path.suffix.lower(), 'unknown')
-TARGET_VERSIONS = {'4.0': {'board': '4', 'footprint': '4'}, '5.0': {'board': '20171130', 'footprint': '20171130'}, '5.1': {'board': '20171130', 'footprint': '20171130'}, '6.0': {'symbol-library': '20211014', 'schematic': '20211123', 'board': '20211014', 'footprint': '20211014', 'worksheet': '20210606', 'design-rules': '1'}, '7.0': {'symbol-library': '20220914', 'schematic': '20230121', 'board': '20221018', 'footprint': '20221018', 'worksheet': '20220228', 'design-rules': '1'}, '8.0': {'symbol-library': '20231120', 'schematic': '20231120', 'board': '20240108', 'footprint': '20240108', 'worksheet': '20231118', 'design-rules': '1'}, '9.0': {'symbol-library': '20241209', 'schematic': '20250114', 'board': '20241229', 'footprint': '20241229', 'worksheet': '20231118', 'design-rules': '1'}, '10.0': {'symbol-library': '20251024', 'schematic': '20260306', 'board': '20260206', 'footprint': '20260206', 'worksheet': '20231118', 'design-rules': '1'}, '10.99': {'symbol-library': '20251024', 'schematic': '20260306', 'board': '20260603', 'footprint': '20260603', 'worksheet': '20231118', 'design-rules': '1'}}
-DEVELOPMENT_BOARD_TARGETS = {'20260521', '20260603'}
+TARGET_VERSIONS = {'4.0': {'board': '4', 'footprint': '4'}, '5.0': {'board': '20171130', 'footprint': '20171130'}, '5.1': {'board': '20171130', 'footprint': '20171130'}, '6.0': {'symbol-library': '20211014', 'schematic': '20211123', 'board': '20211014', 'footprint': '20211014', 'worksheet': '20210606', 'design-rules': '1'}, '7.0': {'symbol-library': '20220914', 'schematic': '20230121', 'board': '20221018', 'footprint': '20221018', 'worksheet': '20220228', 'design-rules': '1'}, '8.0': {'symbol-library': '20231120', 'schematic': '20231120', 'board': '20240108', 'footprint': '20240108', 'worksheet': '20231118', 'design-rules': '1'}, '9.0': {'symbol-library': '20241209', 'schematic': '20250114', 'board': '20241229', 'footprint': '20241229', 'worksheet': '20231118', 'design-rules': '1'}, '10.0': {'symbol-library': '20251024', 'schematic': '20260306', 'board': '20260206', 'footprint': '20260206', 'worksheet': '20231118', 'design-rules': '1'}, '10.99': {'symbol-library': '20260629', 'schematic': '20260722', 'board': '20260728', 'footprint': '20260728', 'worksheet': '20231118', 'design-rules': '1'}}
+DEVELOPMENT_FILE_TARGETS = {'20260410', '20260508', '20260511', '20260512', '20260513', '20260521', '20260603', '20260616', '20260623', '20260624', '20260629', '20260722', '20260728'}
+# Keep this public name for callers that used the pre-10.99-development API.
+DEVELOPMENT_BOARD_TARGETS = DEVELOPMENT_FILE_TARGETS
 
 def _normalize_alias(target):
     value = target.strip().lower()
@@ -899,9 +1173,9 @@ def ensure_version(doc, version):
         doc.root.children.insert(1, sexpr_list(atom('version'), atom(version)))
     doc.version = version
 FeatureRule = tuple
-SYMBOL_RULES = ((20220126, ('text_box', 'textbox'), 'symbol text boxes are not available'), (20240529, ('embedded_files', 'embedded_file'), 'embedded files are not available'), (20241209, ('private',), 'private SCH_FIELD flags are not available'), (20250324, ('pin_group', 'pin_groups'), 'jumper pin groups are not available'), (20250829, ('rounded_rectangle', 'roundrect'), 'rounded rectangles are not available'), (20260508, ('ellipse', 'ellipse_arc'), 'native ellipse primitives are not available'))
-SCHEMATIC_RULES = ((20220126, ('text_box', 'textbox'), 'schematic text boxes are not available'), (20220622, ('simulation_model', 'sim_model'), 'new simulation model format is not available'), (20240101, ('table',), 'schematic tables are not available'), (20240417, ('rule_area',), 'schematic rule areas are not available'), (20240620, ('embedded_files', 'embedded_file'), 'embedded files are not available'), (20241209, ('private',), 'private SCH_FIELD flags are not available'), (20250829, ('rounded_rectangle', 'roundrect'), 'rounded rectangles are not available'), (20250922, ('variants', 'variant'), 'schematic variants are not available'), (20260508, ('ellipse', 'ellipse_arc'), 'native ellipse primitives are not available'), (20260512, ('net_chain', 'net_chains'), 'schematic net chains are not available'))
-BOARD_RULES = ((20220131, ('gr_text_box', 'fp_text_box', 'text_box', 'textbox'), 'PCB textboxes are not available'), (20220621, ('image',), 'PCB image objects are not available'), (20220818, ('net_tie', 'net_ties'), 'first-class net-tie storage is not available'), (20231007, ('generated',), 'PCB generative objects are not available'), (20240108, ('teardrop', 'teardrops', 'legacy_teardrops'), 'teardrop parameters are not available'), (20240202, ('table',), 'PCB tables are not available'), (20240609, ('tenting',), 'tenting keyword is not available'), (20240706, ('embedded_files', 'embedded_file', 'embedded_fonts'), 'embedded files are not available'), (20240928, ('component_class', 'component_classes'), 'component classes are not available'), (20240929, ('padstack',), 'complex padstacks are not available'), (20241006, ('via_stack', 'viastack'), 'via stacks are not available'), (20241009, ('rule_area',), 'placement/rule areas are not available'), (20250228, ('via_protection', 'covering', 'plugging', 'filling', 'capping'), 'IPC-4761 via protection is not available'), (20250818, ('custom_layer_count', 'custom_layer_counts'), 'custom footprint layer counts are not available'), (20250829, ('rounded_rectangle', 'roundrect'), 'rounded rectangles are not available'), (20250901, ('point',), 'PCB point objects are not available'), (20250914, ('barcode', 'pcb_barcode', 'gr_barcode', 'fp_barcode'), 'PCB barcode objects are not available'), (20251101, ('backdrill', 'tertiary_drill', 'front_post_machining', 'back_post_machining'), 'backdrill and tertiary drill fields are not available'), (20260101, ('variants', 'variant'), 'PCB variants are not available'), (20260410, ('extruded',), 'extruded footprint 3D body models are not available'), (20260508, ('gr_ellipse', 'gr_ellipse_arc', 'fp_ellipse', 'fp_ellipse_arc'), 'native PCB ellipse primitives are not available'), (20260511, ('spec_frequency', 'dielectric_model'), 'dielectric frequency-dependent stackup fields are not available'), (20260512, ('net_chains', 'net_chain'), 'PCB net chains are not available'), (20260513, ('thieving',), 'copper thieving zone fill mode is not available'))
+SYMBOL_RULES = ((20220126, ('text_box', 'textbox'), 'symbol text boxes are not available'), (20240529, ('embedded_files', 'embedded_file'), 'embedded files are not available'), (20241209, ('private',), 'private SCH_FIELD flags are not available'), (20250324, ('pin_group', 'pin_groups'), 'jumper pin groups are not available'), (20250829, ('rounded_rectangle', 'roundrect'), 'rounded rectangles are not available'), (20260508, ('ellipse', 'ellipse_arc'), 'native ellipse primitives are not available'), (20260629, ('associated_footprints', 'pin_maps', 'pin_map'), 'symbol pin-to-pad maps are not available'))
+SCHEMATIC_RULES = ((20220126, ('text_box', 'textbox'), 'schematic text boxes are not available'), (20220622, ('simulation_model', 'sim_model'), 'new simulation model format is not available'), (20240101, ('table',), 'schematic tables are not available'), (20240417, ('rule_area',), 'schematic rule areas are not available'), (20240620, ('embedded_files', 'embedded_file'), 'embedded files are not available'), (20241209, ('private',), 'private SCH_FIELD flags are not available'), (20250829, ('rounded_rectangle', 'roundrect'), 'rounded rectangles are not available'), (20250922, ('variants', 'variant'), 'schematic variants are not available'), (20260508, ('ellipse', 'ellipse_arc'), 'native ellipse primitives are not available'), (20260512, ('net_chain', 'net_chains'), 'schematic net chains are not available'), (20260629, ('pin_map_override',), 'schematic pin-to-pad map overrides are not available'), (20260722, ('symbol_override',), 'variant symbol overrides are not available'))
+BOARD_RULES = ((20220131, ('gr_text_box', 'fp_text_box', 'text_box', 'textbox'), 'PCB textboxes are not available'), (20220621, ('image',), 'PCB image objects are not available'), (20220818, ('net_tie', 'net_ties'), 'first-class net-tie storage is not available'), (20231007, ('generated',), 'PCB generative objects are not available'), (20240108, ('teardrop', 'teardrops', 'legacy_teardrops'), 'teardrop parameters are not available'), (20240202, ('table',), 'PCB tables are not available'), (20240609, ('tenting',), 'tenting keyword is not available'), (20240706, ('embedded_files', 'embedded_file', 'embedded_fonts'), 'embedded files are not available'), (20240928, ('component_class', 'component_classes'), 'component classes are not available'), (20240929, ('padstack',), 'complex padstacks are not available'), (20241006, ('via_stack', 'viastack'), 'via stacks are not available'), (20241009, ('rule_area',), 'placement/rule areas are not available'), (20250228, ('via_protection', 'covering', 'plugging', 'filling', 'capping'), 'IPC-4761 via protection is not available'), (20250818, ('custom_layer_count', 'custom_layer_counts'), 'custom footprint layer counts are not available'), (20250829, ('rounded_rectangle', 'roundrect'), 'rounded rectangles are not available'), (20250901, ('point',), 'PCB point objects are not available'), (20250914, ('barcode', 'pcb_barcode', 'gr_barcode', 'fp_barcode'), 'PCB barcode objects are not available'), (20251101, ('backdrill', 'tertiary_drill', 'front_post_machining', 'back_post_machining'), 'backdrill and tertiary drill fields are not available'), (20260101, ('variants', 'variant'), 'PCB variants are not available'), (20260410, ('extruded',), 'extruded footprint 3D body models are not available'), (20260508, ('gr_ellipse', 'gr_ellipse_arc', 'fp_ellipse', 'fp_ellipse_arc'), 'native PCB ellipse primitives are not available'), (20260511, ('spec_frequency', 'dielectric_model'), 'dielectric frequency-dependent stackup fields are not available'), (20260512, ('net_chains', 'net_chain'), 'PCB net chains are not available'), (20260513, ('thieving',), 'copper thieving zone fill mode is not available'), (20260616, ('transform',), 'footprint affine transforms are not available'), (20260624, ('constraint',), 'geometric constraints are not available'), (20260728, ('grid_item',), 'custom grid items are not available'))
 
 def _walk(node):
     if node.atom is not None:
@@ -2647,9 +2921,12 @@ def _queue_descendant_removal(rules, condition, heads, message):
 
 def apply_downgrade_rules(doc, target):
     root = doc.root
+    source = int(doc.version) if _is_number(doc.version) else 0
     warnings = []
     if doc.kind == 'symbol-library':
         child_removals = []
+        if target < 20260508:
+            _warn_if_changed(warnings, downgrade_native_ellipses(root, doc.kind), 'approximated symbol library ellipses with polyline segments')
         warnings.extend(remove_introduced(root, target, SYMBOL_RULES))
         _apply_when(warnings, target < 20231120, lambda: remove_direct_children_by_head(root, 'generator_version'), 'removed symbol library generator_version fields')
         _apply_when(warnings, target < 20241209, lambda: remove_descendants_by_head(root, {'embedded_fonts'}), 'removed symbol library embedded_fonts fields')
@@ -2674,6 +2951,11 @@ def apply_downgrade_rules(doc, target):
     elif doc.kind == 'schematic':
         child_removals = []
         descendant_removals = []
+        if target < 20260508:
+            _warn_if_changed(warnings, downgrade_native_ellipses(root, doc.kind), 'approximated schematic ellipses with polyline segments')
+        rescaled, unavailable = migrate_reference_image_scales(root, doc.kind, source, target)
+        _warn_if_changed(warnings, rescaled, 'rescaled embedded PNG reference images for the older KiCad PPI calculation')
+        _warn_if_changed(warnings, unavailable, 'could not rescale embedded reference images without a usable PNG pHYs chunk')
         warnings.extend(remove_introduced(root, target, SCHEMATIC_RULES))
         _apply_when(warnings, target < 20231120, lambda: remove_direct_children_by_head(root, 'generator_version'), 'removed schematic generator_version fields')
         _queue_descendant_removal(descendant_removals, target < 20260326, {'locked'}, 'removed schematic locked fields introduced after target version')
@@ -2717,6 +2999,15 @@ def apply_downgrade_rules(doc, target):
         child_value_rewrites = []
         descendant_removals = []
         containing_child_removals = []
+        if target < 20260508:
+            _warn_if_changed(warnings, downgrade_native_ellipses(root, doc.kind), 'approximated PCB ellipses with polygon segments')
+        if target < 20260616:
+            baked, non_uniform = bake_footprint_transforms(root)
+            _warn_if_changed(warnings, baked, 'baked footprint affine transforms into legacy at/geometry fields')
+            _warn_if_changed(warnings, non_uniform, 'non-uniform footprint scaling approximates circular primitives for older KiCad')
+        rescaled, unavailable = migrate_reference_image_scales(root, doc.kind, source, target)
+        _warn_if_changed(warnings, rescaled, 'rescaled embedded PNG reference images for the older KiCad PPI calculation')
+        _warn_if_changed(warnings, unavailable, 'could not rescale embedded reference images without a usable PNG pHYs chunk')
         warnings.extend(remove_introduced(root, target, BOARD_RULES))
         if target < 20260410:
             containing_child_removals.append(('model', 'type', 'removed typed/extruded 3D model blocks'))
@@ -2838,6 +3129,7 @@ def apply_downgrade_rules(doc, target):
 
 def apply_upgrade_rules(doc, target):
     root = doc.root
+    source = int(doc.version) if _is_number(doc.version) else 0
     warnings = []
     if target < 20211014:
         return warnings
@@ -2857,6 +3149,9 @@ def apply_upgrade_rules(doc, target):
             warn(move_effects_hide_to_property(root), 'moved symbol property hide flags out of effects')
         warn(remove_id_from_standard_properties(root), 'removed legacy symbol property ids')
     elif doc.kind == 'schematic':
+        rescaled, unavailable = migrate_reference_image_scales(root, doc.kind, source, target)
+        warn(rescaled, 'rescaled embedded PNG reference images for the corrected KiCad PPI calculation')
+        warn(unavailable, 'could not rescale embedded reference images without a usable PNG pHYs chunk')
         warn(rename_child_head_in_parents(root, schematic_tstamp_parents, 'tstamp', 'uuid'), 'renamed schematic tstamp fields to uuid')
         warn(rename_child_head_in_parents(root, {'kicad_sch'}, 'netclass_flag', 'directive_label'), 'renamed schematic netclass flags to directive labels')
         warn(upgrade_text_box_start_end(root), 'upgraded schematic text box start/end fields to at/size')
@@ -2868,6 +3163,9 @@ def apply_upgrade_rules(doc, target):
             warn(move_effects_hide_to_property(root), 'moved schematic property hide flags out of effects')
         warn(remove_id_from_standard_properties(root), 'removed legacy schematic property ids')
     elif doc.kind in {'board', 'footprint'}:
+        rescaled, unavailable = migrate_reference_image_scales(root, doc.kind, source, target)
+        warn(rescaled, 'rescaled embedded PNG reference images for the corrected KiCad PPI calculation')
+        warn(unavailable, 'could not rescale embedded reference images without a usable PNG pHYs chunk')
         warn(remove_children_from_parents(root, {'kicad_pcb'}, {'host'}), 'removed legacy PCB host metadata during upgrade')
         warn(upgrade_pcb_page_to_paper(root), 'renamed legacy PCB page settings to paper')
         warn(upgrade_legacy_arc_angles(root), 'upgraded legacy PCB arc angle fields to midpoint arcs')

@@ -3,6 +3,7 @@ import sys
 import tempfile
 import re
 import base64
+import json
 from pathlib import Path
 
 
@@ -21,10 +22,10 @@ from backport_core import (  # noqa: E402
 def main():
     work = Path(tempfile.mkdtemp(prefix="kicad_backport_plugin_smoke_"))
     try:
-        assert resolve_target_version("board", "10.99") == "20260603"
-        assert resolve_target_version("board", "20260521") == "20260521"
-        assert resolve_target_version("schematic", "20260521") == "20260306"
-        assert resolve_target_version("symbol-library", "20260603") == "20251024"
+        assert resolve_target_version("board", "10.99") == "20260728"
+        assert resolve_target_version("board", "20260728") == "20260728"
+        assert resolve_target_version("schematic", "20260521") == "20260722"
+        assert resolve_target_version("symbol-library", "20260603") == "20260629"
         assert resolve_target_version("board", "5.0") == "20171130"
         assert resolve_target_version("design-rules", "8.0") == "1"
         assert versioned_output_path(work / "demo.kicad_sch", "5.0").name == "demo_V5.sch"
@@ -33,6 +34,136 @@ def main():
         decoded, decoder = zstd_decompress(raw_zstd)
         assert decoded == b"raw-zstd-model"
         assert decoder == "built-in raw/RLE zstd decoder"
+
+        png_with_fractional_ppi = (
+            b'\x89PNG\r\n\x1a\n'
+            + (9).to_bytes(4, 'big') + b'pHYs'
+            + (3780).to_bytes(4, 'big') + (3780).to_bytes(4, 'big') + b'\x01'
+            + b'\x00\x00\x00\x00'
+        )
+        modern_image_data = base64.b64encode(png_with_fractional_ppi).decode('ascii')
+
+        modern_board = work / "modern_10_99.kicad_pcb"
+        modern_board.write_text(
+            '(kicad_pcb (version 20260728) (generator "x") (paper "A4") '
+            '(layers (0 "F.Cu" signal) (31 "B.Cu" signal) (36 "B.SilkS" user "b.silkscreen")) '
+            '(net 0 "") '
+            '(footprint "Transform:Demo" (layer "F.Cu") '
+            '(transform (translate 10 20) (rotate 90) (scale 2 3)) '
+            '(fp_ellipse (center 1 2) (major_radius 2) (minor_radius 1) (rotation_angle 0) '
+            '(stroke (width 0.1) (type default)) (fill none) (layer "F.SilkS")) '
+            '(fp_line (start 1 2) (end 3 4) (stroke (width 0.2) (type default)) (layer "F.SilkS")) '
+            '(pad "1" smd rect (at 1 2) (size 1 2) (layers "F.Cu" "F.Paste" "F.Mask"))) '
+            '(gr_ellipse (center 5 5) (major_radius 2) (minor_radius 1) (rotation_angle 30) '
+            '(stroke (width 0.1) (type default)) (fill none) (layer "F.SilkS")) '
+            '(gr_ellipse_arc (center 8 5) (major_radius 2) (minor_radius 1) (rotation_angle 0) '
+            '(start_angle 0) (end_angle 180) (stroke (width 0.1) (type default)) (fill none) (layer "F.SilkS")) '
+            '(image (at 0 0) (layer "F.SilkS") (data ' + modern_image_data + ')) '
+            '(net_chains (net_chain (name "N") (members (net "")))) '
+            '(constraint length (members)) '
+            '(grid_item xy (at 0 0) (extent 10 10) (spacing 1 1) (priority 1) '
+            '(affects (cursor yes) (routing yes) (placement no))))\n',
+            encoding="utf-8",
+        )
+        _out, _err, code = convert(modern_board, work / "modern_board_keep.kicad_pcb", "10.99")
+        assert code == 0
+        modern_board_keep = (work / "modern_board_keep_V10_99.kicad_pcb").read_text(encoding="utf-8")
+        assert "(version 20260728)" in modern_board_keep
+        assert "(transform" in modern_board_keep and "(grid_item" in modern_board_keep and "(constraint" in modern_board_keep
+
+        modern_board_report = work / "modern_board_report.json"
+        _out, _err, code = convert(modern_board, work / "modern_board_old.kicad_pcb", "10.0", modern_board_report)
+        assert code == 0
+        modern_board_old = (work / "modern_board_old_V10.kicad_pcb").read_text(encoding="utf-8")
+        modern_board_old_compact = " ".join(modern_board_old.split())
+        assert "(version 20260206)" in modern_board_old
+        assert "ellipse" not in modern_board_old and modern_board_old.count("(gr_poly") >= 2 and "(fp_poly" in modern_board_old
+        assert "(transform" not in modern_board_old
+        assert '(at 10 20 90)' in modern_board_old_compact
+        assert '(start 2 6)' in modern_board_old_compact and '(end 6 12)' in modern_board_old_compact
+        assert '(pad "1" smd rect (at 2 6) (size 2 6)' in modern_board_old_compact
+        assert "(net_chains" not in modern_board_old and "(constraint" not in modern_board_old and "(grid_item" not in modern_board_old
+        assert "(scale 0.979166667)" in modern_board_old
+        modern_board_warnings = json.loads(modern_board_report.read_text(encoding="utf-8"))["files"][0]["warnings"]
+        assert any("approximated PCB ellipses" in warning for warning in modern_board_warnings)
+        assert any("baked footprint affine transforms" in warning for warning in modern_board_warnings)
+        assert any("rescaled embedded PNG" in warning for warning in modern_board_warnings)
+        assert any("PCB net chains" in warning for warning in modern_board_warnings)
+        assert any("geometric constraints" in warning for warning in modern_board_warnings)
+        assert any("custom grid items" in warning for warning in modern_board_warnings)
+
+        modern_footprint = work / "modern_10_99.kicad_mod"
+        modern_footprint.write_text(
+            '(footprint "Transform:Standalone" (version 20260728) (generator "x") (layer "F.Cu") '
+            '(transform (translate 4 5) (rotate 45) (scale 2 2)) '
+            '(fp_line (start 1 2) (end 3 4) (stroke (width 0.1) (type default)) (layer "F.SilkS")))\n',
+            encoding="utf-8",
+        )
+        _out, _err, code = convert(modern_footprint, work / "modern_footprint_old.kicad_mod", "10.0")
+        assert code == 0
+        modern_footprint_old = (work / "modern_footprint_old_V10.kicad_mod").read_text(encoding="utf-8")
+        assert "(version 20260206)" in modern_footprint_old
+        assert "(transform" not in modern_footprint_old
+        assert '(at 4 5 45)' in " ".join(modern_footprint_old.split())
+        assert '(start 2 4)' in modern_footprint_old and '(end 6 8)' in modern_footprint_old
+
+        _out, _err, code = convert(modern_board, work / "modern_board_legacy.kicad_pcb", "4.0")
+        assert code == 0
+        modern_board_v4 = (work / "modern_board_legacy_V4.kicad_pcb").read_text(encoding="utf-8")
+        assert '(module "Transform:Demo" (at 10 20 90)' in " ".join(modern_board_v4.split())
+
+        _out, _err, code = convert(work / "modern_board_old_V10.kicad_pcb", work / "modern_board_up.kicad_pcb", "10.99")
+        assert code == 0
+        modern_board_up = (work / "modern_board_up_V10_99.kicad_pcb").read_text(encoding="utf-8")
+        assert "(version 20260728)" in modern_board_up
+        assert "(scale " not in modern_board_up
+
+        modern_schematic = work / "modern_10_99.kicad_sch"
+        modern_schematic.write_text(
+            '(kicad_sch (version 20260722) (generator "x") (uuid "00000000-0000-0000-0000-000000000001") '
+            '(lib_symbols (symbol "X" (pin_names (offset 0)) '
+            '(ellipse (center 0 0) (major_radius 3) (minor_radius 2) (rotation_angle 0) '
+            '(stroke (width 0) (type default)) (fill (type none))))) '
+            '(ellipse (center 5 5) (major_radius 3) (minor_radius 2) (rotation_angle 30) '
+            '(stroke (width 0) (type default)) (fill (type none))) '
+            '(ellipse_arc (center 10 5) (major_radius 3) (minor_radius 2) (rotation_angle 0) (start_angle 0) (end_angle 180) '
+            '(stroke (width 0) (type default)) (fill (type none))) '
+            '(net_chain "N" (from "U1" "1") (to "U2" "1")) '
+            '(symbol (lib_id "X") (at 0 0 0) (uuid "00000000-0000-0000-0000-000000000002") '
+            '(variants (variant (name "ALT") (symbol_override "X_ALT") (pin_map_override (mode identity))))))\n',
+            encoding="utf-8",
+        )
+        modern_schematic_report = work / "modern_schematic_report.json"
+        _out, _err, code = convert(modern_schematic, work / "modern_schematic_old.kicad_sch", "10.0", modern_schematic_report)
+        assert code == 0
+        modern_schematic_old = (work / "modern_schematic_old_V10.kicad_sch").read_text(encoding="utf-8")
+        assert "(version 20260306)" in modern_schematic_old
+        assert "ellipse" not in modern_schematic_old and modern_schematic_old.count("(polyline") >= 3
+        assert "(net_chain" not in modern_schematic_old and "(symbol_override" not in modern_schematic_old and "(pin_map_override" not in modern_schematic_old
+        assert "(variant" in modern_schematic_old
+        modern_schematic_warnings = json.loads(modern_schematic_report.read_text(encoding="utf-8"))["files"][0]["warnings"]
+        assert any("schematic net chains" in warning for warning in modern_schematic_warnings)
+        assert any("pin-to-pad map overrides" in warning for warning in modern_schematic_warnings)
+        assert any("variant symbol overrides" in warning for warning in modern_schematic_warnings)
+
+        modern_symbols = work / "modern_10_99.kicad_sym"
+        modern_symbols.write_text(
+            '(kicad_symbol_lib (version 20260629) (generator "x") '
+            '(symbol "X" (associated_footprints (footprint "Package:Demo" (map "default"))) '
+            '(pin_maps (pin_map "default" (entry "1" "1"))) '
+            '(ellipse (center 0 0) (major_radius 2) (minor_radius 1) (rotation_angle 0) '
+            '(stroke (width 0) (type default)) (fill (type none)))))\n',
+            encoding="utf-8",
+        )
+        modern_symbols_report = work / "modern_symbols_report.json"
+        _out, _err, code = convert(modern_symbols, work / "modern_symbols_old.kicad_sym", "10.0", modern_symbols_report)
+        assert code == 0
+        modern_symbols_old = (work / "modern_symbols_old_V10.kicad_sym").read_text(encoding="utf-8")
+        assert "(version 20251024)" in modern_symbols_old
+        assert "associated_footprints" not in modern_symbols_old and "pin_maps" not in modern_symbols_old and "pin_map" not in modern_symbols_old
+        assert "ellipse" not in modern_symbols_old and "(polyline" in modern_symbols_old
+        modern_symbols_warnings = json.loads(modern_symbols_report.read_text(encoding="utf-8"))["files"][0]["warnings"]
+        assert any("symbol pin-to-pad maps" in warning for warning in modern_symbols_warnings)
 
         pcb = work / "board.kicad_pcb"
         pcb.write_text(
@@ -169,6 +300,12 @@ def main():
         assert "Dwgs.User" in board9_text
         assert "User.Drawings" not in board9_text
         assert "User.5" not in board9_text
+
+        _out, _err, code = convert(board_v5, work / "board_v5_to_latest.kicad_pcb", "10.99")
+        assert code == 0
+        board_v5_to_latest = (work / "board_v5_to_latest_V10_99.kicad_pcb").read_text(encoding="utf-8")
+        assert "(version 20260728)" in board_v5_to_latest
+        assert '(net "N1")' in board_v5_to_latest
 
         _out, _err, code = convert(pcb, work / "board7_out.kicad_pcb", "7.0")
         assert code == 0
@@ -772,6 +909,18 @@ def main():
         assert "(symbol" in sch_up and '"demo:Demo_Symbol"' in sch_up
         assert "(symbol_instances" in sch_up
         assert "(sheet_instances" in sch_up
+        _out, _err, code = convert(work / "demo_sch_out_V5.sch", work / "demo_sch_legacy_latest.sch", "10.99")
+        assert code == 0
+        sch_latest = (work / "demo_sch_legacy_latest_V10_99.kicad_sch").read_text(encoding="utf-8")
+        assert "(version 20260722)" in sch_latest
+        assert "(kicad_sch" in sch_latest and "(symbol_instances" in sch_latest
+
+        _out, _err, code = convert(work / "demo_out_V5.lib", work / "demo_sym_legacy_latest.lib", "10.99")
+        assert code == 0
+        sym_latest = (work / "demo_sym_legacy_latest_V10_99.kicad_sym").read_text(encoding="utf-8")
+        assert "(version 20260629)" in sym_latest
+        assert "(kicad_symbol_lib" in sym_latest
+
         assert re.search(r'\(symbol\s+\(lib_id "demo:Demo_Symbol"\)\s+\(at [^)]* 90\)[\s\S]*?\(property\s+"Reference"\s+"C90"', sch_up)
         assert re.search(r'\(symbol\s+\(lib_id "demo:Demo_Symbol"\)\s+\(at [^)]* 180\)[\s\S]*?\(property\s+"Reference"\s+"C180"', sch_up)
         assert re.search(r'\(symbol\s+\(lib_id "demo:Demo_Symbol"\)\s+\(at [^)]* 270\)[\s\S]*?\(property\s+"Reference"\s+"C270"', sch_up)
@@ -921,6 +1070,13 @@ def main():
         assert '"demo:Demo_Symbol"' in legacy_project_sch
         assert "(lib_symbols" in legacy_project_sch
         assert '"U2"' in legacy_project_sch
+
+        _out, _err, code = convert(legacy_project, work / "legacy_project_latest", "10.99")
+        assert code == 0
+        legacy_project_latest = work / "legacy_project_latest_V10_99"
+        assert "(version 20260629)" in (legacy_project_latest / "demo.kicad_sym").read_text(encoding="utf-8")
+        assert "(version 20260722)" in (legacy_project_latest / "demo.kicad_sch").read_text(encoding="utf-8")
+        assert (legacy_project_latest / "demo.kicad_pro").exists()
 
         _out, _err, code = convert(project, work / "project_out7", "7.0")
         assert code == 0

@@ -2,7 +2,7 @@
 
 Copyright (C) askstar
 
-Version 0.4.3
+Version 0.4.4
 
 KiCad Backport creates a compatibility copy of a KiCad project or file for an
 older KiCad target version. It is designed for practical downgrade and upgrade
@@ -67,9 +67,19 @@ The GUI target list is:
 - KiCad 5.0
 - KiCad 4
 
-The conversion core also accepts raw numeric format targets where supported,
-including development board/footprint formats such as `20260603` and
-`20260521`.
+The conversion core also accepts raw numeric development-format targets, including
+checkpoints from `20260410` through the current `20260728` board/footprint
+format.  The bundled 10.99 profile currently writes symbol libraries at
+`20260629`, schematics at `20260722`, and boards/footprints at `20260728`.
+
+For targets that predate these 10.99 additions, native ellipses are approximated
+with compatible polylines/polygons and footprint affine transforms are baked
+into legacy geometry. Pin-to-pad maps, variant symbol overrides, net chains,
+geometric constraints, and custom grid items are removed only when no
+compatible representation exists; every approximation or removal is recorded
+in the JSON conversion report. Embedded PNG reference images are rescaled when
+crossing the corrected-PPI format boundary (`20260623`) to retain their rendered
+size.
 
 Supported input families include:
 

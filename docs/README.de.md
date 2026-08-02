@@ -2,7 +2,7 @@
 
 Copyright (C) askstar
 
-Version 0.4.3
+Version 0.4.4
 
 KiCad Backport erstellt eine kompatible Kopie eines KiCad-Projekts oder einer
 KiCad-Datei fuer eine aeltere KiCad-Zielversion. Es ist fuer praktische

@@ -1,8 +1,11 @@
 # KiCad Backport
 
+> KiCad 6–10.99 PCM: [Installation / updates / 安裝與更新](pcm-installation.md).
+> Build prerequisite: `python -m pip install -r requirements-dev.txt`.
+
 Copyright (C) askstar
 
-Version 0.4.4
+Version 0.4.5
 
 KiCad Backport erstellt eine kompatible Kopie eines KiCad-Projekts oder einer
 KiCad-Datei fuer eine aeltere KiCad-Zielversion. Es ist fuer praktische
@@ -161,12 +164,8 @@ python plugin\plugin.py --list-targets
 
 Bauen Sie das Plugin-Archiv aus dem Repository-Stamm:
 
-```powershell
-.\build.ps1 -Format all
-```
-
 ```sh
-./build.sh --format all
+python package_plugin.py --format all
 ```
 
 Die unterstuetzten Paketformate sind `zip`, `tar.gz` und `all`.

@@ -4,18 +4,15 @@
 # Keep this ignore file.
 !.gitignore
 
-# Keep root Python source and plugin metadata/docs.
+# Keep Python source, packaging scripts, and project metadata/docs.
 !*.py
-!__init__.py
-!build.ps1
-!build.sh
 !plugin.json
 !requirements.txt
+!requirements-dev.txt
+!LICENSE
 !README.md
-!scripts/
-!scripts/**
 
-# Keep runtime assets, binaries, and KiCad plugin Python sources.
+# Keep runtime assets, binaries, plugin sources, and supporting files.
 !assets/
 !assets/**
 !legacy/
@@ -24,6 +21,20 @@
 !plugin/**
 !docs/
 !docs/**
+!scripts/
+!scripts/**
 
-__pycache__
+# Keep PCM release tooling, schema snapshots, and regression tests.
+!pcm/
+!pcm/**
+!tests/
+!tests/**
+
+# Final exclusions must stay AFTER all allowlist rules above.
+# Ignore generated PCM repository output.
+/pcm/repository/
+
+# Ignore Python cache directories and bytecode at every depth.
+__pycache__/
 *.pyc
+*.pyo

@@ -2,7 +2,7 @@
 
 Copyright (C) askstar
 
-Version 0.4.4
+Version 0.4.5
 
 KiCad Backport creates a compatibility copy of a KiCad project or file for an
 older KiCad target version. It is designed for practical downgrade and upgrade
@@ -118,6 +118,16 @@ configuration path to the external Python 3 process.
 
 ## Install
 
+### Recommended: KiCad 6–10.99 PCM
+
+Install `kicad-backport-v0.4.5-PCM.zip` using **Plugin and Content Manager → Install from File**,
+then restart KiCad. For updates, add the publisher's live `repository.json` URL in Manage Repositories.
+Local ZIP installation alone does not subscribe to updates. API-enabled KiCad 9+ needs a configured
+Python with Tk/wx; KiCad 10.99 requires the API. See the [PCM installation and release guide](pcm-installation.md)
+for prerequisites, migration from manual installs, publishing commands and verification limits.
+
+### Manual installation (existing method)
+
 1. Close KiCad.
 2. Copy the whole `kicad-backport` folder into your KiCad user `plugins`
    folder.
@@ -165,17 +175,20 @@ python plugin\plugin.py --list-targets
 
 ## Build Package
 
-Build the plugin archive from the repository root:
+Install build-only dependencies, then build from the repository root:
 
-```powershell
-.\build.ps1 -Format all
+```sh
+python -m pip install -r requirements-dev.txt
+python package_plugin.py --format pcm  # PCM ZIP only
 ```
 
 ```sh
-./build.sh --format all
+python package_plugin.py --format all
 ```
 
-The supported package formats are `zip`, `tar.gz`, and `all`.
+The supported formats are `pcm`, `zip`, `tar.gz`, and `all`. `zip` and `all` also produce the
+versioned PCM ZIP; the traditional archives keep their manual-install layout. Old release files
+and repository history in `dist/` are not deleted. `--version` asserts, rather than rewrites, the source version.
 
 Useful environment variables:
 

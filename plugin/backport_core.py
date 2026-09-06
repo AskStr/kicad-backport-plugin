@@ -10,7 +10,7 @@ import re
 import glob
 from pathlib import Path
 from typing import Callable, Iterable, Optional
-VERSION = '0.4.4'
+VERSION = '0.4.5'
 ESCAPES = {'n': '\n', 't': '\t', '"': '"', '\\': '\\'}
 
 class Node:

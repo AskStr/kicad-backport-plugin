@@ -2,7 +2,7 @@
 
 版权 (C) 问星/askstar
 
-版本 0.4.4
+版本 0.4.5
 
 KiCad Backport 用于为旧版 KiCad 目标版本创建兼容的工程或文件副本。它面向
 现代 S 表达式文件与 KiCad 5 时代 legacy 文件之间的实际降级和升级流程。
@@ -104,6 +104,15 @@ Python 3 进程。
 
 ## 安装
 
+### 推荐：KiCad 6–10.99 插件与内容管理器
+
+使用 `kicad-backport-v0.4.5-PCM.zip`，在 PCM 中“从文件安装”，安装后完整重启 KiCad。
+检查更新需要在“管理仓库”中添加维护者已发布的 `repository.json` URL；本地 ZIP 不会自动
+订阅更新源。KiCad 10.99 必须启用 API 并配置带 Tk/wx 的 Python。
+详见 [PCM 安装、更新与发布指南](pcm-installation.md)，含手动安装迁移、前提及验收边界。
+
+### 手动安装（保留原方式）
+
 1. 关闭 KiCad。
 2. 将整个 `kicad-backport` 文件夹复制到 KiCad 用户 `plugins` 文件夹。
 3. 对 KiCad 10.99 及更新的 API 插件，请使用带版本号的用户插件目录，例如
@@ -146,17 +155,21 @@ python plugin\plugin.py --list-targets
 
 ## 构建安装包
 
-在仓库根目录构建插件压缩包：
-
-```powershell
-.\build.ps1 -Format all
-```
+先安装仅构建/测试所需的依赖，再构建：
 
 ```sh
-./build.sh --format all
+python -m pip install -r requirements-dev.txt
+python package_plugin.py --format pcm  # 仅生成 PCM ZIP
 ```
 
-支持的打包格式为 `zip`、`tar.gz` 和 `all`。
+Windows、macOS 和 Linux 使用相同的 Python 构建命令：
+
+```sh
+python package_plugin.py --format all
+```
+
+支持 `pcm`、`zip`、`tar.gz` 和 `all`。`zip` / `all` 同时生成 PCM ZIP；传统压缩包
+仍用于手动安装。构建不会清空 `dist/` 中的历史发布物；版本参数只校验源码版本。
 
 常用环境变量：
 

@@ -2,7 +2,7 @@
 
 Copyright (C) askstar
 
-Version 0.4.6
+Version 0.4.7
 
 KiCad Backport creates a compatibility copy of a KiCad project or file for an
 older KiCad target version. It is designed for practical downgrade and upgrade
@@ -136,11 +136,18 @@ configuration path to the external Python 3 process.
 
 ### Recommended: KiCad 6–10.99 PCM
 
-Install `kicad-backport-v0.4.6-PCM.zip` using **Plugin and Content Manager → Install from File**,
-then restart KiCad. For updates, add the publisher's live `repository.json` URL in Manage Repositories.
-Local ZIP installation alone does not subscribe to updates. API-enabled KiCad 9+ needs a configured
-Python with Tk/wx; KiCad 10.99 requires the API. See the [PCM installation and release guide](pcm-installation.md)
-for prerequisites, migration from manual installs, publishing commands and verification limits.
+Add this URL once in **PCM → Manage Repositories**, refresh, and install KiCad Backport:
+
+```text
+https://github.com/AskStr/kicad-backport-plugin/releases/latest/download/repository.json
+```
+
+For later versions, use **Refresh → Update → Apply Changes**, then restart KiCad.
+Existing subscribers need no changes. KiCad 6–10.99 share the same feed; API-enabled
+KiCad 9+ needs configured Python with Tk/wx, and KiCad 10.99 requires the API.
+See the [PCM guide](pcm-installation.md) for prerequisites and the automated release workflow.
+The plugin is not yet in the default official repository. Installing a local PCM ZIP
+alone does not subscribe to updates.
 
 ### Manual installation (existing method)
 

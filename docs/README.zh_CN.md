@@ -2,7 +2,7 @@
 
 版权 (C) 问星/askstar
 
-版本 0.4.6
+版本 0.4.7
 
 KiCad Backport 用于为旧版 KiCad 目标版本创建兼容的工程或文件副本。它面向
 现代 S 表达式文件与 KiCad 5 时代 legacy 文件之间的实际降级和升级流程。
@@ -117,10 +117,16 @@ Python 3 进程。
 
 ### 推荐：KiCad 6–10.99 插件与内容管理器
 
-使用 `kicad-backport-v0.4.6-PCM.zip`，在 PCM 中“从文件安装”，安装后完整重启 KiCad。
-检查更新需要在“管理仓库”中添加维护者已发布的 `repository.json` URL；本地 ZIP 不会自动
-订阅更新源。KiCad 10.99 必须启用 API 并配置带 Tk/wx 的 Python。
-详见 [PCM 安装、更新与发布指南](pcm-installation.md)，含手动安装迁移、前提及验收边界。
+首次在「PCM → 管理仓库」添加下面的地址，刷新后直接安装 KiCad Backport：
+
+```text
+https://github.com/AskStr/kicad-backport-plugin/releases/latest/download/repository.json
+```
+
+之后只需 **刷新 → 更新 / 更新全部 → 应用更改**，再重启 KiCad。已订阅用户无需更改地址。
+KiCad 6–10.99 使用同一更新源；10.99 必须启用 API，并配置带 Tk/wx 的 Python。
+详见 [PCM 安装与自动发布指南](pcm-installation.md)。本插件尚未进入默认官方仓库；
+“从文件安装”本身不会订阅更新。
 
 ### 手动安装（保留原方式）
 

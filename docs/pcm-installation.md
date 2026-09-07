@@ -1,181 +1,117 @@
-# PCM 安装、检查更新与发布 / PCM installation and updates
+# PCM 安装与检查更新 / Install and update
 
-## 适用范围
+## 用户只需配置一次
 
-从 **0.4.5** 开始，`kicad-backport-v<版本>-PCM.zip` 是统一的 KiCad **6.0–10.99**
-插件与内容管理器（PCM）安装包。转换目标版本与这里的“运行插件的 KiCad 版本”是两回事。
+兼容 **KiCad 6–10.99**。在「插件与内容管理器 → 管理仓库」添加：
 
-| 运行环境 | 入口与前提 |
-|---|---|
-| KiCad 6 / 7 / 8 | 内置 Python、pcbnew、wxPython ActionPlugin；不需要 API |
-| KiCad 9 / 10，API 关闭 | 同上，保留旧版入口 |
-| KiCad 9 / 10，API 开启 | `plugin.json` 的 Python API 操作；不重复注册 ActionPlugin |
-| KiCad 10.99 | API/Python 操作；必须启用 KiCad API，并设置可用的外部 Python |
+```text
+https://github.com/AskStr/kicad-backport-plugin/releases/latest/download/repository.json
+```
 
-API 使用的 Python 需要 **Python 3.8+**、`venv`、`pip`，以及 `tkinter` / `_tkinter` /
-Tcl/Tk（或可用的 wxPython）。仅有 Python 可执行文件不代表具备 GUI 组件；Linux 发行版通常
-将 Tk 拆为独立系统包。插件的 `requirements.txt` 不要求第三方 pip 包，但 KiCad 自身的
-虚拟环境初始化仍可能需要网络。安装后如 API 被 PCM 提示开启，请检查 Python 配置并完整重启 KiCad。
+然后刷新，选择 **KiCad Backport → 安装 → 应用挂起的更改**，安装后重启 KiCad。
+以后只需在 PCM **刷新 → 更新 / 更新全部 → 应用更改**，更新后重启；不需要重新输入
+URL、下载索引或手动处理图标。已订阅这个地址的用户无需改配置。
 
-该插件处理磁盘上的文件，不需要 `kicad-python`，不会主动连接 IPC 或修改当前板子。
-保持原有界面和转换核心；API 仅负责发现和启动独立 Python 操作。
+本插件尚未收录到 KiCad official repository，所以首次仍需添加一次上述仓库。
+Round Tracks 已被官方收录，其用户省去了这一步；不能仅通过插件代码跳过官方审核。
+“从文件安装”只安装 ZIP，不等于订阅仓库。旧的本地安装若无法关联，请先备份，
+在 PCM 卸载后从仓库重新安装。不要同时保留会重复注册的手动安装副本。
 
-## 用户安装
+## 各 KiCad 版本的运行前提
 
-1. 从维护者发布页下载带 **`-PCM.zip`** 后缀的安装包，**不要解压**。
-2. 从 KiCad 项目管理器打开“插件与内容管理器”，选择“从文件安装”，选中这个 ZIP。
-3. 应用安装操作，完整关闭并重新启动 KiCad 和已打开的编辑器。
-4. 在 PCB 编辑器的插件菜单/工具栏查找 `Create KiCad Backport` / `创建 KiCad 兼容副本`。
-   API 操作在宿主支持的其他范围也可用；旧 ActionPlugin 仅在 PCB 编辑器中提供。
-5. 如此前手动复制过插件，请先自行备份并移走旧副本，避免手动副本和 PCM 副本各注册一个按钮。
+| KiCad | 运行入口 | PCM 检查更新 |
+|---|---|---|
+| 6 / 7 / 8 | 内置 Python、pcbnew、wxPython ActionPlugin | 同一订阅地址和版本历史 |
+| 9 / 10，API 关闭 | 保留上述旧入口 | 同上 |
+| 9 / 10，API 开启 | Python API 操作，不重复注册旧入口 | 同上 |
+| 10.99 | 必须启用 KiCad API，配置可用 Python | 同上 |
 
-PCM 自动将 `plugins/` 内容安装到当前 KiCad 版本的第三方目录，包目录类似
-`third-party/plugins/com_askstar_kicad_backport/`。不要在 ZIP 内再嵌套这个包名目录。
-不同 KiCad 大版本的 PCM 安装和设置相互独立，需要分别安装。
+插件最低 Python **3.8**；外部 Python 需提供 Tk 或 wxPython，API 环境还需 venv/pip。
+转换核心不新增第三方运行依赖。PCM 的列表、图标、兼容性筛选和更新由 KiCad 管理，
+不会新增插件内后台更新器，也不会自行改写用户的 PCM 配置或安装数据库。
 
-`kicad-backport.zip` 和 `.tar.gz` 仍是**传统手动安装包**，不能用“从文件安装”导入。
-KiCad 4/5 继续使用原手动安装方案，不在 PCM 6–10.99 范围内。
+所有当前发布版本的 PCM 兼容范围保持 `6.0`–`10.99`，标识符保持
+`com.askstar.kicad.backport`。同一版本重发不会触发更新提示；插件内容变更应提升版本号。
+这次对 V0.4.7 的修订只简化发布工具，已公开 ZIP 字节和下载哈希保持不变。
 
-## 检查更新：必须添加在线仓库
+## 维护者：不再手动拼 URL 或上传多个索引
 
-本地 ZIP 提供安装能力，**并不自动订阅更新源**。维护者发布仓库后：
+**正常发布：**修改版本号并提交，推送对应的 `V<版本>` 标签。
+GitHub Actions 的 **Publish PCM update** 自动完成：
 
-1. 在 PCM 的“管理仓库”中添加维护者提供的完整 `repository.json` URL。
-2. 刷新仓库/重新打开 PCM，等待仓库索引下载。
-3. 对已安装插件查看可用版本，选择更新并应用；更新后完整重启 KiCad。
-4. 如果最初从文件安装后仍标记为本地包或未关联仓库，请先备份，再在 PCM 卸载本地包，
-   从新增仓库重新安装一次。不要通过手工修改 PCM 安装数据库强行关联。
+1. 获取上一正式 Release 的历史索引；获取失败就停止，避免丢失历史。
+2. 打包、校验并自动生成下载地址、版本列表、图标和更新时间戳。
+3. 上传完整资产，全部就绪后才发布为最新正式 Release。
+4. 匿名验证固定订阅地址、每个版本的下载大小和 SHA-256。
 
-同一个包必须始终使用 `com.askstar.kicad.backport` 标识。更新按数值版本判断，重新发布
-相同版本或只改下载地址不会成为新版本。API 开关变化后同样需要重启，才能切换运行入口。
+**补跑发布：**在 GitHub「Actions → Publish PCM update → Run workflow」输入现有标签。
+已发布标签会直接复用原 ZIP，不会偷偷重打包或覆盖安装包。工作流串行运行，拒绝将
+旧版本重新设为 latest。请不要再手动发布一个没有更新索引的“最新”Release。
 
-插件没有后台联网、自更新线程、自动覆盖安装目录或自动修改用户 KiCad 配置的行为。
-检查、安装、卸载及更新均由 PCM 负责。离线、HTTP/证书错误或仓库尚未发布时，不能检查在线更新。
+### 本地打包也只需一条命令
 
-## 开发者构建
-
-在仓库根目录安装**仅构建/测试**所需依赖（不会打入插件运行包）：
+安装构建依赖后执行：
 
 ```sh
 python -m pip install -r requirements-dev.txt
-python package_plugin.py --format pcm
+python package_plugin.py
 ```
 
-上述命令产生 `dist/kicad-backport-v0.4.6-PCM.zip`。不加参数的 `python package_plugin.py` 默认仅生成 PCM ZIP。输出是可复现 ZIP：固定时间、权限和条目顺序。
-源码 `plugin.json` 与 `plugin/backport_core.py` 的版本必须一致。支持 `--status testing` 等
-PCM 状态覆盖；默认 `stable`。同一输出文件已有不同内容时拒绝覆盖，正式发布后必须升版本。
-本地试验应使用 `--output dist/trial-PCM.zip` 等独立路径，不要复用正式版本文件。
+参考 Round Tracks，输出 PCM ZIP、`dist/metadata.json` 和 `dist/icon.png`。
+需要同时准备现有自建更新源时：
 
 ```sh
-python package_plugin.py --format all
+python package_plugin.py --repository
 ```
 
-| format | 输出 |
-|---|---|
-| `pcm`（默认） | 仅统一 PCM ZIP |
-| `zip` | PCM ZIP、传统 ZIP、解包后的手动目录 |
-| `tar.gz` | 传统 tar.gz、解包后的手动目录 |
-| `all` | PCM ZIP、传统 ZIP、传统 tar.gz、解包后的手动目录 |
+下载地址自动按本项目的 `V<版本>` 标签生成，历史自动合并。独立的
+`package_repository.py` 仍保留给自定义部署，不是日常必需步骤。
 
-所有打包逻辑由 Python 执行，不依赖 Shell、PowerShell、外部 `zip` 或 `tar`。
-只保留两个职责独立的打包入口，不再提供额外转发脚本：
-- `package_plugin.py`：生成 PCM 和传统手动安装包。
-- `package_repository.py`：读取已有 PCM ZIP，生成更新仓库索引，不重复打包插件。
-
-`tests/` 保留 Python 回归测试，`scripts/` 仅保留 Python 冒烟测试脚本。
-
-构建不会清空整个 `dist/`，保留旧发布 ZIP 和更新仓库历史。解包后的便利目录不做递归清理，
-可能留有开发过程中已删除的旧文件；正式分发请使用按当前源码重新生成的 ZIP/tar.gz。
-`--version` / `-v` 只校验版本，不再打印与包内容不一致的版本号。
-
-## 生成仓库与发布
-
-以下 URL 是**发布规划示例，不代表已上线**。如使用不同域名、GitHub tag 或路径，必须替换为
-自己的最终公开地址；`--download-url` 必须指向 ZIP 原始字节，不能是 Release HTML 页面。
+V0.4.7 已经发布，不应因文档或打包工具修改而重建同版本 ZIP。复用已发布归档：
 
 ```sh
-python package_repository.py --archive dist/kicad-backport-v0.4.6-PCM.zip --output dist/pcm-repository --base-url https://askstr.github.io/kicad-backport-plugin/pcm --download-url https://github.com/AskStr/kicad-backport-plugin/releases/download/v0.4.6/kicad-backport-v0.4.6-PCM.zip
+python package_plugin.py --archive dist/kicad-backport-v0.4.7-PCM.zip --repository
 ```
 
-生成器完全离线，生成：
+`--format zip` / `--format all` 仍支持传统手动安装包。
 
-- `packages.json`：历史版本来源，供下一次发布合并；不能丢失。
-- `packages-<SHA256>.json`：不可变在线索引，与 `packages.json` 内容一致。
-- `repository.json`：指向不可变索引，包含 SHA-256 和递增的 `update_timestamp`。
+## 官方仓库接入（可选，不影响当前 PCM 更新）
 
-发布顺序：
+生成的 `metadata.json` 和 `icon.png` 是官方接入材料，不需要用户安装这两个文件。
+按 KiCad 官方流程，将它们放入官方 metadata 仓库的
+`packages/com.askstar.kicad.backport/`，验证并提交 merge request。
+官方审核通过并同步后，用户才能在默认官方仓库直接找到本插件。
+包名/命名空间仍需官方审核；不擅自更换现有标识符，以免破坏已安装用户的更新关联。
 
-1. 上传带版本号的 PCM ZIP，确认可公开下载且不是认证/HTML 页面。
-2. 上传 `packages-<SHA256>.json` 和作为历史备份的 `packages.json`。
-3. **最后**替换公开的 `repository.json`，避免用户取得指向未上传内容的索引。
-4. 保留旧 ZIP 和旧哈希索引，让仍持有旧根索引缓存的用户继续下载。
-5. 将最终 `repository.json` URL 提供给用户，并在实际 PCM 中验收首次安装、更新与卸载。
+官方维护版本目录；GitHub 负责托管 ZIP。单纯在 GitHub 发布新版本，不会自动完成
+官方 metadata 的审核与更新。当前自建订阅源已自动化，不必等待官方收录才能检查更新。
 
-工具不会创建 GitHub Release、上传、推送提交或自动配置 Pages。仓库根索引应允许重新验证缓存，
-避免 CDN 对 `repository.json` 使用永久不可变缓存；哈希索引和版本化 ZIP 可以长期缓存。
-
-下一版本发布时递增源版本，并使用相同输出目录自动读取历史，或明确传入：
+## 验证与边界
 
 ```sh
-python package_repository.py --archive dist/kicad-backport-v0.4.6-PCM.zip --output dist/pcm-repository --previous-packages previous/packages.json --base-url https://askstr.github.io/kicad-backport-plugin/pcm --download-url https://github.com/AskStr/kicad-backport-plugin/releases/download/v0.4.6/kicad-backport-v0.4.6-PCM.zip
-```
-
-同版本 ZIP 字节变化会被拒绝；保持历史包和数值版本排序。内容未变时根索引和时间戳保持不变；
-内容变化时自动递增时间戳。可用 `--timestamp <Unix秒>` 做可重复发布测试，但必须大于已有变更
-索引的时间戳并满足官方日期格式。
-
-回滚请发布一个**更高版本号**的修复包或在 PCM 手动重新安装旧版本，不要篡改已经发布版本的 ZIP。
-生成器不负责并发发布锁；同一个仓库应串行发布，并以最新的 `packages.json` 为历史输入。
-
-## 验证与限制
-
-```sh
-python -m unittest discover -s tests -v
-python scripts/compat_smoke.py
-python scripts/i18n_smoke.py
+python -m unittest discover -s tests
 python scripts/pcm_native_smoke.py --kicad-root D:/KiCad
+python scripts/pcm_repository_smoke.py --url https://github.com/AskStr/kicad-backport-plugin/releases/latest/download/repository.json
 ```
 
-2026-09-06 验证范围：
-
-- 单元测试覆盖双 Schema、实际 PCM 目录解包、运行入口、跨平台配置定位、损坏配置、无 pcbnew、
-  CLI、可复现构建、历史保留、版本不可变、哈希与时间戳、路径/清单校验及手动包兼容。
-- Windows 原生 KiCad **6.0.11 / 7.0.11 / 8.0.9 / 9.0.7 / 10.0.4** 的内置 Python/
-  pcbnew 实际 ActionPlugin 注册及运行代码导入通过；API 开/关下的注册数量符合预期。
-- 对本机 **10.99.0-2335-g1899bad41c** 的官方 PCM/API Schema 校验通过。其 IPC-only 安装不含
-  `python.exe`，不把“无 pcbnew 安全导入”测试声称为原生 10.99 PCM GUI 安装成功。
-- 现有转换、国际化、参考规则与真实夹具 smoke 均需保持通过。
-
-**尚不能据此宣称**：所有操作系统和全部 10.99 nightly 均已实机验收；正式在线仓库已上线；
-PCM GUI 首次安装→联网更新→卸载全流程已实机通过。开发版可继续改变插件协议，需要跟随验证。
-
----
+覆盖范围包括版本历史/不可变归档、图标、Schema、HTTP 下载和更新索引、命令行、
+Python 3.8 语法与 KiCad 6–10.99 的兼容声明。Windows KiCad 6–10 的原生注册及 PNG
+解码、10.99 官方 Schema 已验证。未声称所有操作系统/nightly 或完整 PCM GUI
+安装→更新→卸载交互都已验收。资源图标可能受 KiCad 自身缓存节流影响，不需要改缓存文件。
 
 ## English quick guide
 
-Use `kicad-backport-v0.4.6-PCM.zip` with **Plugin and Content Manager → Install from File**.
-Do not unpack it. Restart KiCad afterwards. Remove old manual copies yourself to avoid duplicate actions.
-The unified package supports KiCad 6–10.99: legacy pcbnew/wx on 6–8 and API-disabled 9–10;
-Python API actions on API-enabled 9+. KiCad 10.99 requires the API and a usable Python environment with
-Tk (or wxPython), venv and pip. No third-party pip dependency is required by the converter.
+Add the fixed JSON URL above once in PCM **Manage Repositories**, refresh, and install
+KiCad Backport from that repository. Later, use PCM **Refresh → Update → Apply Changes**
+and restart KiCad. Existing subscribers keep the same URL. KiCad 6–10.99 use the same
+feed; only the plugin runtime prerequisites differ as listed above. Python 3.8+ is required.
 
-A local ZIP does **not** subscribe to updates. Add the publisher's live `repository.json` URL in
-**Manage Repositories**, refresh PCM, then apply an available update and restart. If a local install is
-not associated with that repository, back it up, uninstall through PCM, and install from the repository.
-There is no background self-updater and no automatic change to user settings.
+Tag pushes trigger **Publish PCM update**, which restores history, builds and validates,
+uploads all assets, and publishes only after everything is complete. Use **Run workflow**
+to retry an existing tag; its already-published ZIP is reused, never rebuilt. A single local
+`python package_plugin.py` generates ZIP + official metadata/icon; add `--repository` for
+the existing custom feed. `--archive <published.zip>` preserves a released archive.
 
-Build with `python -m pip install -r requirements-dev.txt`, then `python package_plugin.py --format all`.
-All packaging runs in Python; no shell, external ZIP utility or tar executable is required.
-`python package_plugin.py` defaults to PCM only; use `--format zip` for PCM + traditional ZIP,
-or `--format all` to include tar.gz. The only packaging entrypoints are `package_plugin.py`
-(plugin archives) and `package_repository.py` (update indexes from an existing PCM ZIP).
-Traditional `kicad-backport.zip` / `.tar.gz` remain manual-install archives, not PCM inputs.
-
-Use `package_repository.py --help` and the commands above to generate offline indexes. The example
-public URLs are **not a statement that a repository has been deployed**. Upload the release ZIP first,
-the immutable hash-named package index next, and `repository.json` last. Preserve previous releases
-and indexes. Keep release versions immutable, bump versions for fixes, and serialize publishing.
-
-Native Windows registration was tested on KiCad 6.0.11 through 10.0.4; 10.99 schema validation and
-IPC-only import were checked. Full native PCM GUI installation/update/uninstallation, a live repository,
-and every OS/nightly build are not claimed as verified.
+Official-repository inclusion, like Round Tracks, requires a separate reviewed submission.
+The exported metadata/icon support that process; they do not mean the plugin has already
+been accepted. No background self-updater or automatic user-configuration changes are added.

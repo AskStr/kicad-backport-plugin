@@ -124,7 +124,7 @@ Native tests check loading and preservation of track/via counts. Structural
 tests additionally check endpoints, fill, layer, UUIDs, group references,
 font-width round trips, source-file preservation, and project/DRU conversion.
 
-Verified on this machine: all 47 tests, including the optional native cases;
+Verified on this machine: all 54 tests, including the optional native cases;
 21 upstream PCB conversions/loads across KiCad 4/5/6/7/8/9/10; schematic and
 symbol SVG exports in KiCad 7/8/9/10; existing compatibility, i18n, reference
 parity, real-fixture, and KiCad 5 smoke tests.

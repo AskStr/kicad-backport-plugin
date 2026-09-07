@@ -12,7 +12,7 @@ import uuid
 from bisect import bisect_right
 from pathlib import Path
 from typing import Callable, Iterable, Optional
-VERSION = '0.4.6'
+VERSION = '0.4.7'
 ESCAPES = {'n': '\n', 't': '\t', '"': '"', '\\': '\\'}
 
 class Node:

@@ -10,7 +10,8 @@ import time
 from urllib.parse import urlsplit
 from zipfile import BadZipFile, ZipFile
 
-from package_plugin import ROOT, atomic_write, json_bytes, validate_manifest, validate_schema
+from package_plugin import (ROOT, atomic_write, json_bytes, validate_manifest, validate_schema,
+                            validate_pcm_icon, zip_bytes)
 
 
 def http_url(value):
@@ -47,12 +48,9 @@ def validate_indexes(value, definition):
                 http_url(version['download_url'])
 
 
-def build_repository(archive_path, output_dir, base_url, download_url, previous_packages=None, timestamp=None):
-    http_url(base_url)
-    http_url(download_url)
-    if urlsplit(base_url).query:
-        raise ValueError('Repository base URL must be a directory without a query')
-    archive_path, output = Path(archive_path), Path(output_dir)
+def read_release(archive_path, download_url=None):
+    """Read an immutable PCM ZIP and derive its public per-version metadata."""
+    archive_path = Path(archive_path)
     with ZipFile(archive_path) as archive:
         names = archive.namelist()
         if sum(info.file_size for info in archive.infolist()) > 64 * 1024 * 1024:
@@ -60,10 +58,13 @@ def build_repository(archive_path, output_dir, base_url, download_url, previous_
         if len(names) != len(set(names)) or archive.testzip():
             raise ValueError('Invalid ZIP entries or checksum')
         if any('\\' in name or ':' in name or any(p in ('', '.', '..') for p in name.split('/'))
-               or (name != 'metadata.json' and not name.startswith('plugins/')) for name in names):
+               or (name not in ('metadata.json', 'resources/icon.png') and not name.startswith('plugins/')) for name in names):
             raise ValueError('Not a safe unified PCM archive')
         metadata = json.loads(archive.read('metadata.json'))
         entries = {name[8:]: archive.read(name) for name in names if name.startswith('plugins/')}
+        installed_icon = archive.read('resources/icon.png') if 'resources/icon.png' in names else b''
+        # Older immutable releases lacked a PCM icon; keep them in version history.
+        icon = validate_pcm_icon(installed_icon or (ROOT / 'pcm/icon.png').read_bytes())
     for schema in ('pcm.v1.schema.json', 'pcm.v2.schema.json'):
         validate_schema(metadata, schema)
     manifest = validate_manifest(entries)
@@ -73,7 +74,7 @@ def build_repository(archive_path, output_dir, base_url, download_url, previous_
     version = metadata['versions'][0]
     if (version['version'] != manifest['version'] or version.get('runtime') != 'ipc'
             or version['kicad_version'] != '6.0' or version.get('kicad_version_max') != '10.99'
-            or version.get('install_size') != sum(map(len, entries.values()))
+            or version.get('install_size') != sum(map(len, entries.values())) + len(installed_icon)
             or any(name.startswith('download_') for name in version)):
         raise ValueError('Expected unified PCM metadata without download fields')
     for name in ('__init__.py', 'legacy/kicad_backport_action.py', 'requirements.txt', 'LICENSE'):
@@ -83,7 +84,33 @@ def build_repository(archive_path, output_dir, base_url, download_url, previous_
     with archive_path.open('rb') as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b''):
             digest.update(chunk)
+    if download_url is None:
+        download_url = metadata['resources']['homepage'].rstrip('/') + '/releases/download/V' + version['version'] + '/' + archive_path.name
+    http_url(download_url)
     version.update(download_url=download_url, download_sha256=digest.hexdigest(), download_size=archive_path.stat().st_size)
+
+    return metadata, icon
+
+
+def merge_versions(metadata, old):
+    version = metadata['versions'][0]
+    for release in old['versions']:
+        if version_key(release) == version_key(version):
+            if any(release.get(key) != version.get(key) for key in ('download_sha256', 'download_size')):
+                raise ValueError('Published version has different bytes; bump the source version')
+        else:
+            metadata['versions'].append(release)
+    metadata['versions'].sort(key=version_key, reverse=True)
+
+
+def build_repository(archive_path, output_dir, base_url, download_url, previous_packages=None, timestamp=None):
+    http_url(base_url)
+    http_url(download_url)
+    if urlsplit(base_url).query:
+        raise ValueError('Repository base URL must be a directory without a query')
+    archive_path, output = Path(archive_path), Path(output_dir)
+    metadata, icon = read_release(archive_path, download_url)
+    expected_id = metadata['identifier']
 
     history = Path(previous_packages) if previous_packages is not None else output / 'packages.json'
     packages = json.loads(history.read_text(encoding='utf-8')) if previous_packages is not None or history.exists() else {'packages': []}
@@ -91,12 +118,7 @@ def build_repository(archive_path, output_dir, base_url, download_url, previous_
     for index, old in enumerate(packages['packages']):
         if old['identifier'] != expected_id:
             continue
-        for release in old['versions']:
-            if version_key(release) == version_key(version):
-                if any(release.get(key) != version.get(key) for key in ('download_sha256', 'download_size')):
-                    raise ValueError('Published version has different bytes; bump the source version')
-            else:
-                metadata['versions'].append(release)
+        merge_versions(metadata, old)
         packages['packages'].pop(index)
         break
     metadata['versions'].sort(key=version_key, reverse=True)
@@ -108,13 +130,21 @@ def build_repository(archive_path, output_dir, base_url, download_url, previous_
     # Immutable index name lets publishers upload files before switching the root.
     index_name = 'packages-' + packages_hash + '.json'
     index_url = base_url.rstrip('/') + '/' + index_name
+    resources_data = zip_bytes({expected_id + '/icon.png': icon})
+    resources_hash = hashlib.sha256(resources_data).hexdigest()
+    resources_name = 'resources-' + resources_hash + '.zip'
+    resources_url = base_url.rstrip('/') + '/' + resources_name
     root_path = output / 'repository.json'
     previous = json.loads(root_path.read_text(encoding='utf-8')) if root_path.exists() else None
     if previous:
         validate_indexes(previous, 'Repository')
     old = previous['packages'] if previous else {}
-    changed = old.get('sha256') != packages_hash or old.get('url') != index_url
-    old_timestamp = old.get('update_timestamp', 0)
+    old_resources = previous.get('resources', {}) if previous else {}
+    # KiCad can reuse the old resource reference when the packages timestamp
+    # is unchanged. Invalidate that cache for resource-only changes as well.
+    changed = (old.get('sha256') != packages_hash or old.get('url') != index_url
+               or old_resources.get('sha256') != resources_hash or old_resources.get('url') != resources_url)
+    old_timestamp = max(old.get('update_timestamp', 0), old_resources.get('update_timestamp', 0))
     if timestamp is None:
         timestamp = max(int(time.time()), old_timestamp + 1) if changed else old_timestamp
     if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < 0:
@@ -127,11 +157,40 @@ def build_repository(archive_path, output_dir, base_url, download_url, previous_
         'packages': {'url': index_url, 'sha256': packages_hash, 'update_timestamp': timestamp,
                      'update_time_utc': datetime.fromtimestamp(timestamp, timezone.utc).strftime('%Y-%m-%d %H:%M:%S')},
     }
+    repository['resources'] = {
+        'url': resources_url, 'sha256': resources_hash, 'update_timestamp': timestamp,
+        'update_time_utc': repository['packages']['update_time_utc'],
+    }
     validate_indexes(repository, 'Repository')
+    atomic_write(output / resources_name, resources_data)
     atomic_write(output / index_name, packages_data)
     atomic_write(output / 'packages.json', packages_data)  # Editable history input, not the live pointer.
     atomic_write(root_path, json_bytes(repository))
     return root_path
+
+
+def prepare_release(archive_path, repository=False):
+    """Round Tracks-style ZIP + metadata/icon; optionally maintain the existing feed."""
+    archive_path = Path(archive_path)
+    output = archive_path.parent
+    metadata, icon = read_release(archive_path)
+    metadata_path = output / 'metadata.json'
+    if repository:
+        download_url = metadata['versions'][0]['download_url']
+        root = build_repository(archive_path, output / 'pcm-repository',
+                                download_url.rsplit('/', 1)[0], download_url)
+        packages = json.loads((root.parent / 'packages.json').read_text(encoding='utf-8'))
+        metadata = next(p for p in packages['packages'] if p['identifier'] == metadata['identifier'])
+    elif metadata_path.exists():
+        old = json.loads(metadata_path.read_text(encoding='utf-8'))
+        validate_indexes({'packages': [old]}, 'PackageArray')
+        if old['identifier'] != metadata['identifier']:
+            raise ValueError('Existing metadata belongs to a different package')
+        merge_versions(metadata, old)
+    validate_indexes({'packages': [metadata]}, 'PackageArray')
+    atomic_write(metadata_path, json_bytes(metadata))
+    atomic_write(output / 'icon.png', icon)
+    return metadata_path, output / 'icon.png'
 
 
 def main(argv=None):

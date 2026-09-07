@@ -27,7 +27,7 @@ class PackageTests(unittest.TestCase):
                 base = Path(temp)
                 source = base/'source'
                 source.mkdir()
-                for name in ('package_plugin.py', '__init__.py', 'plugin.json', 'requirements.txt', 'README.md', 'LICENSE'):
+                for name in ('package_plugin.py', 'package_repository.py', '__init__.py', 'plugin.json', 'requirements.txt', 'README.md', 'LICENSE'):
                     shutil.copyfile(ROOT/name, source/name)
                 for name in ('plugin', 'legacy', 'assets', 'docs', 'pcm'):
                     shutil.copytree(ROOT/name, source/name, ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo'))
@@ -51,6 +51,10 @@ class PackageTests(unittest.TestCase):
                     with ZipFile(pcm) as archive:
                         self.assertIsNone(archive.testzip())
                         self.assertIn('metadata.json', archive.namelist())
+                    metadata = json.loads((output/'metadata.json').read_bytes())
+                    self.assertEqual(version, metadata['versions'][0]['version'])
+                    self.assertEqual(hashlib.sha256(original).hexdigest(), metadata['versions'][0]['download_sha256'])
+                    self.assertTrue((output/'icon.png').is_file())
                 if has_zip:
                     with ZipFile(manual_zip) as archive:
                         self.assertIsNone(archive.testzip())
@@ -69,6 +73,61 @@ class PackageTests(unittest.TestCase):
                 self.assertIn('does not match', result.stderr)
                 if has_pcm:
                     self.assertEqual(original, pcm.read_bytes())
+
+    def test_one_command_reuses_published_zip_and_prepares_update_feed(self):
+        from package_plugin import build_archive
+        with tempfile.TemporaryDirectory(prefix='Backport simple release ') as temp:
+            base = Path(temp)
+            archive = build_archive(output_path=base/'published.zip')
+            original = archive.read_bytes()
+            command = [sys.executable, str(ROOT/'package_plugin.py'), '--archive', str(archive), '--repository']
+            for attempt in range(2):
+                result = subprocess.run(command, cwd=base, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        universal_newlines=True, timeout=30)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(original, archive.read_bytes())
+                metadata = json.loads((base/'metadata.json').read_bytes())
+                release = metadata['versions'][0]
+                self.assertEqual(('6.0', '10.99', 'ipc'),
+                                 (release['kicad_version'], release['kicad_version_max'], release['runtime']))
+                self.assertEqual(hashlib.sha256(original).hexdigest(), release['download_sha256'])
+                self.assertEqual('https://github.com/AskStr/kicad-backport-plugin/releases/download/V' + release['version'] + '/published.zip', release['download_url'])
+                repository = base/'pcm-repository/repository.json'
+                if attempt:
+                    self.assertEqual(previous, repository.read_bytes())
+                previous = repository.read_bytes()
+                self.assertEqual(metadata, json.loads((base/'pcm-repository/packages.json').read_bytes())['packages'][0])
+
+    def test_official_metadata_keeps_history_and_rejects_changed_release(self):
+        from package_plugin import build_archive, json_bytes
+        from package_repository import prepare_release
+        with tempfile.TemporaryDirectory(prefix='Backport official metadata ') as temp:
+            base = Path(temp)
+            archive = build_archive(output_path=base/'published.zip')
+            path, icon = prepare_release(archive)
+            old = json.loads(path.read_bytes())
+            current_version = old['versions'][0]['version']
+            old['versions'][0]['version'] = '0.4.6'
+            path.write_bytes(json_bytes(old))
+            prepare_release(archive)
+            metadata = json.loads(path.read_bytes())
+            self.assertEqual([current_version, '0.4.6'], [v['version'] for v in metadata['versions']])
+            metadata['versions'][0]['download_sha256'] = '0'*64
+            path.write_bytes(json_bytes(metadata))
+            before = path.read_bytes()
+            with self.assertRaisesRegex(ValueError, 'different bytes'):
+                prepare_release(archive)
+            self.assertEqual(before, path.read_bytes())
+
+    def test_archive_mode_rejects_conflicting_output_options(self):
+        with tempfile.TemporaryDirectory(prefix='Backport invalid options ') as temp:
+            for options in (['--output', 'new.zip'], ['--format', 'all']):
+                result = subprocess.run([sys.executable, str(ROOT/'package_plugin.py'), '--archive', 'missing.zip'] + options,
+                                        cwd=temp, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        universal_newlines=True, timeout=30)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn('--archive cannot', result.stderr)
+                self.assertFalse(list(Path(temp).iterdir()))
 
     def test_repository_cli_uses_existing_archive_from_another_directory(self):
         with tempfile.TemporaryDirectory(prefix='Backport Python repository ') as temp:

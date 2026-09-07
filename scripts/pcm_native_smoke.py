@@ -21,6 +21,8 @@ import importlib, os, sys
 import wx
 app = wx.App(False)
 wx.DisableAsserts()
+image = wx.Image(sys.argv[4], wx.BITMAP_TYPE_PNG)
+assert image.IsOk() and (image.GetWidth(), image.GetHeight()) == (64, 64)
 import pcbnew
 sys.path.insert(0, sys.argv[1])
 registered = []
@@ -49,6 +51,9 @@ def main():
             metadata = json.loads(archive.read('metadata.json'))
             manifest = json.loads(archive.read('plugins/plugin.json'))
             package = base/'plugins'/metadata['identifier'].replace('.', '_')
+            icon = base/'resources'/metadata['identifier'].replace('.', '_')/'icon.png'
+            icon.parent.mkdir(parents=True, exist_ok=True)
+            icon.write_bytes(archive.read('resources/icon.png'))
             for name in archive.namelist():
                 if name.startswith('plugins/'):
                     path = package/name[8:]
@@ -75,7 +80,7 @@ def main():
                 for key in ('PYTHONHOME', 'PYTHONPATH'):
                     env.pop(key, None)
                 expected = 0 if api and int(version.split('.')[0]) >= 9 else 1
-                result = subprocess.run([str(python), '-B', '-u', '-c', PROBE, str(package.parent), package.name, str(expected)],
+                result = subprocess.run([str(python), '-B', '-u', '-c', PROBE, str(package.parent), package.name, str(expected), str(icon)],
                                         env=env, cwd=base, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
                 if result.returncode:
                     raise RuntimeError(version + '\n' + result.stdout + result.stderr)

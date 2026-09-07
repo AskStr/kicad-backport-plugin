@@ -38,3 +38,8 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# Automated PCM release/update publishing.
+!.github/
+!.github/workflows/
+!.github/workflows/pcm-release.yml

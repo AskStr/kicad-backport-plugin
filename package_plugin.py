@@ -7,6 +7,7 @@ import io
 import json
 from pathlib import Path, PurePosixPath
 import re
+import struct
 import tarfile
 import tempfile
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
@@ -102,11 +103,20 @@ def zip_bytes(entries):
     return stream.getvalue()
 
 
+def validate_pcm_icon(data):
+    # PCM uses a dedicated 64px PNG, not plugin.json's toolbar icons.
+    if (len(data) < 33 or data[:16] != b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR'
+            or struct.unpack('>II', data[16:24]) != (64, 64)):
+        raise ValueError('PCM icon must be a 64x64 PNG')
+    return data
+
+
 def build_archive(source_root=ROOT, output_path=None, status='stable'):
     root = Path(source_root).resolve()
     entries = runtime_files(root)
     manifest = validate_manifest(entries, root)
     entries['__init__.py'] = (root / 'pcm/entrypoint.py').read_bytes()
+    icon = validate_pcm_icon((root / 'pcm/icon.png').read_bytes())
     metadata = {
         '$schema': 'https://go.kicad.org/pcm/schemas/v1',
         'name': manifest['name'], 'identifier': manifest['identifier'],
@@ -117,19 +127,20 @@ def build_archive(source_root=ROOT, output_path=None, status='stable'):
                             'One PCM package supports KiCad 6 through 10.99. '
                             'KiCad 6–8 and API-disabled 9–10 use pcbnew/wxPython. '
                             'API-enabled KiCad 9+ uses the Python action; KiCad 10.99 requires the API. '
-                            'The external Python must provide tkinter/Tcl/Tk or wxPython, venv and pip. '
+                            'Python 3.8 or later is required; external Python must provide tkinter/Tcl/Tk or wxPython, venv and pip. '
                             'No third-party pip dependencies are required by the converter.',
         'resources': {'homepage': 'https://github.com/AskStr/kicad-backport-plugin',
                       'issues': 'https://github.com/AskStr/kicad-backport-plugin/issues'},
         'tags': ['backport', 'conversion', 'compatibility'],
         'versions': [{'version': manifest['version'], 'status': status, 'runtime': 'ipc',
                       'kicad_version': '6.0', 'kicad_version_max': '10.99',
-                      'install_size': sum(map(len, entries.values()))}],
+                      'install_size': sum(map(len, entries.values())) + len(icon)}],
     }
     for schema in ('pcm.v1.schema.json', 'pcm.v2.schema.json'):
         validate_schema(metadata, schema, root=root)
     payload = {'plugins/' + name: data for name, data in entries.items()}
     payload['metadata.json'] = json_bytes(metadata)
+    payload['resources/icon.png'] = icon
     output = Path(output_path or root / 'dist' / ('kicad-backport-v' + manifest['version'] + '-PCM.zip')).resolve()
     if output.suffix.lower() != '.zip':
         raise ValueError('PCM output must be a ZIP')
@@ -173,17 +184,29 @@ def main(argv=None):
     parser.add_argument('--version', '-v', dest='expected_version')
     parser.add_argument('--format', '-f', choices=('pcm', 'zip', 'tar.gz', 'all'), default='pcm')
     parser.add_argument('--output', '-o', help='PCM ZIP output path')
+    parser.add_argument('--archive', help='Reuse an existing published PCM ZIP without rebuilding it')
+    parser.add_argument('--repository', action='store_true', help='Also prepare the existing PCM update feed; URLs are derived automatically')
     parser.add_argument('--status', choices=('stable', 'testing', 'development', 'deprecated'), default='stable')
     args = parser.parse_args(argv)
     manifest = json.loads((ROOT / 'plugin.json').read_text(encoding='utf-8'))
     for expected in (args.version, args.expected_version):
         if expected and expected != manifest['version']:
             parser.error('Requested version does not match plugin.json; update source versions first')
+    if args.archive and (args.output or args.format != 'pcm'):
+        parser.error('--archive cannot be combined with --output or manual package formats')
+    if args.repository and args.format == 'tar.gz':
+        parser.error('--repository requires a PCM ZIP')
     if args.output and args.format == 'tar.gz':
         parser.error('--output is only for PCM ZIPs')
     try:
         if args.format != 'tar.gz':
-            print(build_archive(output_path=args.output, status=args.status))
+            from package_repository import prepare_release
+            archive = Path(args.archive) if args.archive else build_archive(output_path=args.output, status=args.status)
+            print(archive)
+            for path in prepare_release(archive, repository=args.repository):
+                print(path)
+            if args.repository:
+                print(archive.parent / 'pcm-repository/repository.json')
         if args.format != 'pcm':
             for path in build_manual(format=args.format):
                 print(path)

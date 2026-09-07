@@ -1,6 +1,7 @@
 """PCM layout, registration, and offline update lifecycle regressions."""
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -44,7 +45,7 @@ class PcmTests(unittest.TestCase):
 
     def publish(self, archive=None, **kwargs):
         options = dict(archive_path=archive or self.archive, output_dir=self.directory / 'repo',
-                       base_url='https://example.org/pcm', download_url='https://example.org/releases/0.4.6.zip')
+                       base_url='https://example.org/pcm', download_url='https://example.org/releases/0.4.7.zip')
         options.update(kwargs)
         return build_repository(**options)
 
@@ -61,16 +62,74 @@ class PcmTests(unittest.TestCase):
         version = self.metadata['versions'][0]
         self.assertEqual(('6.0', '10.99', 'ipc'), (version['kicad_version'], version['kicad_version_max'], version['runtime']))
         self.assertFalse(any(key.startswith('download_') for key in version))
-        self.assertEqual(sum(len(data) for name, data in self.entries.items() if name.startswith('plugins/')), version['install_size'])
+        self.assertEqual(sum(len(data) for name, data in self.entries.items() if name.startswith(('plugins/', 'resources/'))), version['install_size'])
         self.assertEqual((ROOT/'pcm/entrypoint.py').read_bytes(), self.entries['plugins/__init__.py'])
         self.assertNotEqual((ROOT/'__init__.py').read_bytes(), self.entries['plugins/__init__.py'])
         self.assertIn('plugins/LICENSE', self.entries)
         for name in self.entries:
-            self.assertTrue(name == 'metadata.json' or name.startswith('plugins/'))
+            self.assertTrue(name in ('metadata.json', 'resources/icon.png') or name.startswith('plugins/'))
             self.assertNotIn('\\', name)
             self.assertNotIn('__pycache__', name)
             self.assertFalse(name.endswith(('.pyc', '.pyo')))
             self.assertNotIn('/tests/', name)
+
+    def test_installed_and_repository_icons(self):
+        icon = (ROOT / 'pcm/icon.png').read_bytes()
+        self.assertEqual(icon, self.entries['resources/icon.png'])
+        # PCM substitutes underscores only for the installed directory, not ZIP keys.
+        installed = self.base / 'third-party/resources' / self.metadata['identifier'].replace('.', '_')
+        installed.mkdir(parents=True, exist_ok=True)
+        (installed / 'icon.png').write_bytes(self.entries['resources/icon.png'])
+        root_path = self.publish()
+        root = json.loads(root_path.read_bytes())
+        resource = root['resources']
+        data = (root_path.parent / resource['url'].rsplit('/', 1)[1]).read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), resource['sha256'])
+        with ZipFile(io.BytesIO(data)) as archive:
+            self.assertEqual([self.metadata['identifier'] + '/icon.png'], archive.namelist())
+            self.assertEqual(icon, archive.read(archive.namelist()[0]))
+        self.assertEqual(64, int.from_bytes(icon[16:20], 'big'))
+        self.assertEqual(64, int.from_bytes(icon[20:24], 'big'))
+
+    def test_repository_resource_migration_invalidates_package_cache(self):
+        path = self.publish(timestamp=1788652800)
+        root = json.loads(path.read_bytes())
+        packages_hash = root['packages']['sha256']
+        root.pop('resources')  # An existing pre-icon repository.
+        path.write_bytes(json_bytes(root))
+        before = path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.publish(timestamp=1788652800)
+        self.assertEqual(before, path.read_bytes())
+        self.publish(timestamp=1788652801)
+        root = json.loads(path.read_bytes())
+        self.assertEqual(packages_hash, root['packages']['sha256'])
+        self.assertEqual(1788652801, root['packages']['update_timestamp'])
+        self.assertEqual(1788652801, root['resources']['update_timestamp'])
+        before = path.read_bytes()
+        self.publish()
+        self.assertEqual(before, path.read_bytes())
+
+    def test_pre_icon_releases_remain_usable(self):
+        def without_icon(entries):
+            icon = entries.pop('resources/icon.png')
+            metadata = json.loads(entries['metadata.json'])
+            metadata['versions'][0]['install_size'] -= len(icon)
+            entries['metadata.json'] = json_bytes(metadata)
+        old = self.mutated_archive(without_icon)
+        before = old.read_bytes()
+        path = self.publish(old)
+        self.assertIn('resources', json.loads(path.read_bytes()))
+        self.assertEqual(before, old.read_bytes())
+
+    def test_reject_invalid_icon_and_install_size(self):
+        for mutate in (
+            lambda entries: entries.update({'resources/icon.png': b'not a PNG'}),
+            lambda entries: entries.update({'resources/../icon.png': b'bad'}),
+            lambda entries: entries.pop('resources/icon.png'),
+        ):
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                self.publish(self.mutated_archive(mutate))
 
     def test_deterministic_build_and_immutable_output(self):
         second = build_archive(output_path=self.directory / 'same.zip')
@@ -180,7 +239,7 @@ print(len(registered))
         history_path.write_bytes(json_bytes(history))
         path = self.publish(timestamp=1788652801)
         releases = json.loads(history_path.read_bytes())['packages'][0]['versions']
-        self.assertEqual(['0.4.6','0.4.4'], [item['version'] for item in releases])
+        self.assertEqual(['0.4.7','0.4.4'], [item['version'] for item in releases])
         releases[0]['download_sha256'] = '0'*64
         history = json.loads(history_path.read_bytes())
         history['packages'][0]['versions'] = releases

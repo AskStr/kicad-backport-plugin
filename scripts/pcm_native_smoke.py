@@ -76,7 +76,7 @@ def main():
                     env.pop(key, None)
                 expected = 0 if api and int(version.split('.')[0]) >= 9 else 1
                 result = subprocess.run([str(python), '-B', '-u', '-c', PROBE, str(package.parent), package.name, str(expected)],
-                                        env=env, cwd=base, capture_output=True, text=True, timeout=30)
+                                        env=env, cwd=base, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
                 if result.returncode:
                     raise RuntimeError(version + '\n' + result.stdout + result.stderr)
                 print('API=' + str(api), result.stdout.strip())

@@ -5,7 +5,7 @@
 
 版權 (C) 問星/askstar
 
-版本 0.4.5
+版本 0.4.6
 
 KiCad Backport 用於為舊版 KiCad 目標版本建立相容的專案或檔案副本。它面向
 現代 S 表達式檔案與 KiCad 5 時代 legacy 檔案之間的實際降級和升級流程。
@@ -65,7 +65,7 @@ GUI 目標列表：
 
 支援輸入系列包括：
 
-- 目前 KiCad 10.99 每夜版檔案
+- KiCad 10.99 每夜版檔案（已核對至 2026-09-07 快照；[相容範圍](nightly-format-support.md)）
 - KiCad 10、9、8、7、6、5 檔案
 - KiCad legacy `.sch`、`.lib`、`.dcm`、`.pro` 檔案
 

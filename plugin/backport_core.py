@@ -8,9 +8,11 @@ import ctypes.util
 import os
 import re
 import glob
+import uuid
+from bisect import bisect_right
 from pathlib import Path
 from typing import Callable, Iterable, Optional
-VERSION = '0.4.5'
+VERSION = '0.4.6'
 ESCAPES = {'n': '\n', 't': '\t', '"': '"', '\\': '\\'}
 
 class Node:
@@ -1034,8 +1036,8 @@ def detect_kind(path, top_level):
     if top_level in by_head:
         return by_head[top_level]
     return {'.pro': 'legacy-project', '.sch': 'legacy-schematic', '.lib': 'legacy-symbol-library', '.dcm': 'legacy-symbol-documentation', '.kicad_pro': 'project', '.kicad_sym': 'symbol-library', '.kicad_sch': 'schematic', '.kicad_pcb': 'board', '.kicad_mod': 'footprint', '.kicad_dru': 'design-rules', '.kicad_wks': 'worksheet'}.get(path.suffix.lower(), 'unknown')
-TARGET_VERSIONS = {'4.0': {'board': '4', 'footprint': '4'}, '5.0': {'board': '20171130', 'footprint': '20171130'}, '5.1': {'board': '20171130', 'footprint': '20171130'}, '6.0': {'symbol-library': '20211014', 'schematic': '20211123', 'board': '20211014', 'footprint': '20211014', 'worksheet': '20210606', 'design-rules': '1'}, '7.0': {'symbol-library': '20220914', 'schematic': '20230121', 'board': '20221018', 'footprint': '20221018', 'worksheet': '20220228', 'design-rules': '1'}, '8.0': {'symbol-library': '20231120', 'schematic': '20231120', 'board': '20240108', 'footprint': '20240108', 'worksheet': '20231118', 'design-rules': '1'}, '9.0': {'symbol-library': '20241209', 'schematic': '20250114', 'board': '20241229', 'footprint': '20241229', 'worksheet': '20231118', 'design-rules': '1'}, '10.0': {'symbol-library': '20251024', 'schematic': '20260306', 'board': '20260206', 'footprint': '20260206', 'worksheet': '20231118', 'design-rules': '1'}, '10.99': {'symbol-library': '20260629', 'schematic': '20260722', 'board': '20260728', 'footprint': '20260728', 'worksheet': '20231118', 'design-rules': '1'}}
-DEVELOPMENT_FILE_TARGETS = {'20260410', '20260508', '20260511', '20260512', '20260513', '20260521', '20260603', '20260616', '20260623', '20260624', '20260629', '20260722', '20260728'}
+TARGET_VERSIONS = {'4.0': {'board': '4', 'footprint': '4'}, '5.0': {'board': '20171130', 'footprint': '20171130'}, '5.1': {'board': '20171130', 'footprint': '20171130'}, '6.0': {'symbol-library': '20211014', 'schematic': '20211123', 'board': '20211014', 'footprint': '20211014', 'worksheet': '20210606', 'design-rules': '1'}, '7.0': {'symbol-library': '20220914', 'schematic': '20230121', 'board': '20221018', 'footprint': '20221018', 'worksheet': '20220228', 'design-rules': '1'}, '8.0': {'symbol-library': '20231120', 'schematic': '20231120', 'board': '20240108', 'footprint': '20240108', 'worksheet': '20231118', 'design-rules': '1'}, '9.0': {'symbol-library': '20241209', 'schematic': '20250114', 'board': '20241229', 'footprint': '20241229', 'worksheet': '20231118', 'design-rules': '1'}, '10.0': {'symbol-library': '20251024', 'schematic': '20260306', 'board': '20260206', 'footprint': '20260206', 'worksheet': '20231118', 'design-rules': '1'}, '10.99': {'symbol-library': '20260830', 'schematic': '20260830', 'board': '20260831', 'footprint': '20260831', 'worksheet': '20231118', 'design-rules': '1'}}
+DEVELOPMENT_FILE_TARGETS = {'20260410', '20260508', '20260511', '20260512', '20260513', '20260521', '20260603', '20260616', '20260623', '20260624', '20260629', '20260710', '20260722', '20260728', '20260803', '20260816', '20260818', '20260826', '20260828', '20260830', '20260831'}
 # Keep this public name for callers that used the pre-10.99-development API.
 DEVELOPMENT_BOARD_TARGETS = DEVELOPMENT_FILE_TARGETS
 
@@ -1054,6 +1056,8 @@ def resolve_target_version(kind, target):
     if not value:
         raise ValueError('empty target version')
     if _is_number(value):
+        if kind == 'design-rules' and len(value) == 8:
+            return '1'
         if value in DEVELOPMENT_BOARD_TARGETS and kind not in {'board', 'footprint'}:
             mapped = TARGET_VERSIONS['10.99'].get(kind)
             if mapped:
@@ -1175,7 +1179,7 @@ def ensure_version(doc, version):
 FeatureRule = tuple
 SYMBOL_RULES = ((20220126, ('text_box', 'textbox'), 'symbol text boxes are not available'), (20240529, ('embedded_files', 'embedded_file'), 'embedded files are not available'), (20241209, ('private',), 'private SCH_FIELD flags are not available'), (20250324, ('pin_group', 'pin_groups'), 'jumper pin groups are not available'), (20250829, ('rounded_rectangle', 'roundrect'), 'rounded rectangles are not available'), (20260508, ('ellipse', 'ellipse_arc'), 'native ellipse primitives are not available'), (20260629, ('associated_footprints', 'pin_maps', 'pin_map'), 'symbol pin-to-pad maps are not available'))
 SCHEMATIC_RULES = ((20220126, ('text_box', 'textbox'), 'schematic text boxes are not available'), (20220622, ('simulation_model', 'sim_model'), 'new simulation model format is not available'), (20240101, ('table',), 'schematic tables are not available'), (20240417, ('rule_area',), 'schematic rule areas are not available'), (20240620, ('embedded_files', 'embedded_file'), 'embedded files are not available'), (20241209, ('private',), 'private SCH_FIELD flags are not available'), (20250829, ('rounded_rectangle', 'roundrect'), 'rounded rectangles are not available'), (20250922, ('variants', 'variant'), 'schematic variants are not available'), (20260508, ('ellipse', 'ellipse_arc'), 'native ellipse primitives are not available'), (20260512, ('net_chain', 'net_chains'), 'schematic net chains are not available'), (20260629, ('pin_map_override',), 'schematic pin-to-pad map overrides are not available'), (20260722, ('symbol_override',), 'variant symbol overrides are not available'))
-BOARD_RULES = ((20220131, ('gr_text_box', 'fp_text_box', 'text_box', 'textbox'), 'PCB textboxes are not available'), (20220621, ('image',), 'PCB image objects are not available'), (20220818, ('net_tie', 'net_ties'), 'first-class net-tie storage is not available'), (20231007, ('generated',), 'PCB generative objects are not available'), (20240108, ('teardrop', 'teardrops', 'legacy_teardrops'), 'teardrop parameters are not available'), (20240202, ('table',), 'PCB tables are not available'), (20240609, ('tenting',), 'tenting keyword is not available'), (20240706, ('embedded_files', 'embedded_file', 'embedded_fonts'), 'embedded files are not available'), (20240928, ('component_class', 'component_classes'), 'component classes are not available'), (20240929, ('padstack',), 'complex padstacks are not available'), (20241006, ('via_stack', 'viastack'), 'via stacks are not available'), (20241009, ('rule_area',), 'placement/rule areas are not available'), (20250228, ('via_protection', 'covering', 'plugging', 'filling', 'capping'), 'IPC-4761 via protection is not available'), (20250818, ('custom_layer_count', 'custom_layer_counts'), 'custom footprint layer counts are not available'), (20250829, ('rounded_rectangle', 'roundrect'), 'rounded rectangles are not available'), (20250901, ('point',), 'PCB point objects are not available'), (20250914, ('barcode', 'pcb_barcode', 'gr_barcode', 'fp_barcode'), 'PCB barcode objects are not available'), (20251101, ('backdrill', 'tertiary_drill', 'front_post_machining', 'back_post_machining'), 'backdrill and tertiary drill fields are not available'), (20260101, ('variants', 'variant'), 'PCB variants are not available'), (20260410, ('extruded',), 'extruded footprint 3D body models are not available'), (20260508, ('gr_ellipse', 'gr_ellipse_arc', 'fp_ellipse', 'fp_ellipse_arc'), 'native PCB ellipse primitives are not available'), (20260511, ('spec_frequency', 'dielectric_model'), 'dielectric frequency-dependent stackup fields are not available'), (20260512, ('net_chains', 'net_chain'), 'PCB net chains are not available'), (20260513, ('thieving',), 'copper thieving zone fill mode is not available'), (20260616, ('transform',), 'footprint affine transforms are not available'), (20260624, ('constraint',), 'geometric constraints are not available'), (20260728, ('grid_item',), 'custom grid items are not available'))
+BOARD_RULES = ((20200807, ('group',), 'PCB groups are not available; physical members are retained'), (20220131, ('gr_text_box', 'fp_text_box', 'text_box', 'textbox'), 'PCB textboxes are not available'), (20220621, ('image',), 'PCB image objects are not available'), (20220818, ('net_tie', 'net_ties'), 'first-class net-tie storage is not available'), (20231007, ('generated',), 'PCB generative objects are not available'), (20240108, ('teardrop', 'teardrops', 'legacy_teardrops'), 'teardrop parameters are not available'), (20240202, ('table',), 'PCB tables are not available'), (20240609, ('tenting',), 'tenting keyword is not available'), (20240706, ('embedded_files', 'embedded_file', 'embedded_fonts'), 'embedded files are not available'), (20240928, ('component_class', 'component_classes'), 'component classes are not available'), (20240929, ('padstack',), 'complex padstacks are not available'), (20241006, ('via_stack', 'viastack'), 'via stacks are not available'), (20241009, ('rule_area',), 'placement/rule areas are not available'), (20250228, ('via_protection', 'covering', 'plugging', 'filling', 'capping'), 'IPC-4761 via protection is not available'), (20250818, ('custom_layer_count', 'custom_layer_counts'), 'custom footprint layer counts are not available'), (20250829, ('rounded_rectangle', 'roundrect'), 'rounded rectangles are not available'), (20250901, ('point',), 'PCB point objects are not available'), (20250914, ('barcode', 'pcb_barcode', 'gr_barcode', 'fp_barcode'), 'PCB barcode objects are not available'), (20251101, ('backdrill', 'tertiary_drill', 'front_post_machining', 'back_post_machining'), 'backdrill and tertiary drill fields are not available'), (20260101, ('variants', 'variant'), 'PCB variants are not available'), (20260410, ('extruded',), 'extruded footprint 3D body models are not available'), (20260508, ('gr_ellipse', 'gr_ellipse_arc', 'fp_ellipse', 'fp_ellipse_arc'), 'native PCB ellipse primitives are not available'), (20260511, ('spec_frequency', 'dielectric_model'), 'dielectric frequency-dependent stackup fields are not available'), (20260512, ('net_chains', 'net_chain'), 'PCB net chains are not available'), (20260513, ('thieving',), 'copper thieving zone fill mode is not available'), (20260616, ('transform',), 'footprint affine transforms are not available'), (20260624, ('constraint',), 'geometric constraints are not available'), (20260728, ('grid_item',), 'custom grid items are not available'))
 
 def _walk(node):
     if node.atom is not None:
@@ -1954,7 +1958,7 @@ def downgrade_pcb_footprint_fields(root, target=0):
                             text.children.append(sub)
                     if hidden:
                         if target <= 20171130:
-                            text.children.insert(3, atom('hide'))
+                            text.children.append(atom('hide'))
                         else:
                             _append_fp_text_hide(text)
                     kept.append(text)
@@ -2919,10 +2923,361 @@ def _queue_descendant_removal(rules, condition, heads, message):
     if condition:
         rules.append((heads, message))
 
+
+def migrate_bold_stroke_widths(root, kind, source, target):
+    """20260826 stores the base stroke width instead of a baked bold width."""
+    if not source or (source < 20260826) == (target < 20260826):
+        return 0
+    scale = 1000000 if kind in {'board', 'footprint'} else 10000
+    changed = 0
+    for font in _walk(root):
+        if font.head() != 'font':
+            continue
+        face = font.child_list('face')
+        if face and face.atom_at(1) not in {'', 'KiCad Font', 'Default Font'}:
+            continue  # Outline fonts carry weight in the typeface, not the stroke.
+        bold = font.child_list('bold')
+        is_bold = _bool_value(bold.atom_at(1)) if bold else any(c.atom == 'bold' for c in font.children)
+        width = font.child_list('thickness')
+        value = _to_float(width.atom_at(1)) if width else None
+        if not is_bold or value is None or not math.isfinite(value) or value * scale <= 1:
+            continue  # Keep automatic widths automatic, matching upstream's IU threshold.
+        units = int(value * scale + 0.5)
+        units = max(2, int(units / 1.6 + 0.5)) if target >= 20260826 else int(units * 1.6 + 0.5)
+        width.set_atom_at(1, _format_float(units / scale))
+        changed += 1
+    return changed
+
+
+def _ending_parameters(ending, line_width):
+    style = ending.atom_at(1) if ending else 'none'
+    if style not in {'none', 'arrow', 'arrow_open', 'circle', 'square'}:
+        raise ValueError('cannot safely downgrade unknown line ending style: ' + style)
+    length = max(0.0, _child_float(ending, 'length', 0.0)) if ending else 0.0
+    width = max(0.0, _child_float(ending, 'width', 0.0)) if ending else 0.0
+    size = (length or width or 5 * line_width, width or length or 5 * line_width)
+    stroke = ending.child_list('stroke') if ending else None
+    stroke_width = max(0.0, _child_float(stroke, 'width', 0.0)) if stroke else 0.0
+    depth = size[0] if style == 'arrow' else size[0] / 2 if style in {'circle', 'square'} else 0.0
+    depth = max(0.0, depth - stroke_width / 2)
+    orientation_depth = size[0] if style == 'arrow_open' else depth
+    return style, size, stroke_width, depth, orientation_depth
+
+
+def _bezier_split(points, t):
+    left, right = [points[0]], [points[-1]]
+    while len(points) > 1:
+        points = [(a[0] * (1 - t) + b[0] * t, a[1] * (1 - t) + b[1] * t)
+                  for a, b in zip(points, points[1:])]
+        left.append(points[0])
+        right.append(points[-1])
+    return left, list(reversed(right))
+
+
+def _line_ending_body(node, parameters):
+    """Return original endpoints/outward directions, shortening the body in-place."""
+    head = node.head()
+    curve = head in {'bezier', 'gr_curve', 'fp_curve'}
+    arc = head in {'arc', 'gr_arc', 'fp_arc'}
+    poly = head in {'polyline', 'gr_poly', 'fp_poly'}
+    if head not in {'gr_line', 'fp_line'} and not (curve or arc or poly):
+        raise ValueError('cannot safely bake line endings on ' + head)
+    coordinates = _points_xy(node) if poly or curve else [node.child_list('start'), node.child_list('end')]
+    points = [_xy_float_tuple(n) if n else None for n in coordinates]
+    if len(points) < 2 or any(p is None or not all(math.isfinite(v) for v in p) for p in points):
+        raise ValueError('invalid geometry for line ending on ' + head)
+    start, end = points[0], points[-1]
+    depths = [p[3] for p in parameters]
+    orientation_depths = [p[4] for p in parameters]
+    directions = [(start[0] - points[1][0], start[1] - points[1][1]),
+                  (end[0] - points[-2][0], end[1] - points[-2][1])]
+    keep_body = True
+    if arc:
+        circle = _legacy_arc_from_midpoint(node.child_list('start'), node.child_list('mid'), node.child_list('end'))
+        if circle is None:
+            raise ValueError('degenerate arc with line endings')
+        cx, cy, sweep = circle
+        sweep = math.radians(sweep)
+        radius = math.hypot(start[0] - cx, start[1] - cy)
+        angle = math.atan2(start[1] - cy, start[0] - cx)
+        sign = 1 if sweep > 0 else -1
+        for i, a in enumerate((angle + sign * orientation_depths[0] / (2 * radius),
+                               angle + sweep - sign * orientation_depths[1] / (2 * radius))):
+            direction = sign * (-1 if i == 0 else 1)
+            directions[i] = (-math.sin(a) * direction, math.cos(a) * direction)
+        keep_body = sum(depths) < abs(sweep) * radius
+        if keep_body:
+            a0 = angle + sign * depths[0] / radius
+            a1 = angle + sweep - sign * depths[1] / radius
+            for token, a in [('start', a0), ('mid', (a0 + a1) / 2), ('end', a1)]:
+                point = node.child_list(token)
+                point.set_atom_at(1, _format_float(cx + radius * math.cos(a)))
+                point.set_atom_at(2, _format_float(cy + radius * math.sin(a)))
+    elif curve:
+        if len(points) != 4:
+            raise ValueError('expected four Bezier controls for line endings')
+        # Bounded arc-length estimation; retain an exact cubic sub-curve rather than
+        # replacing its body with many independently dashed PCB segments.
+        samples = [_bezier_split(points, i / 128)[0][-1] for i in range(129)]
+        lengths = [0.0]
+        for a, b in zip(samples, samples[1:]):
+            lengths.append(lengths[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+        total = lengths[-1]
+
+        def parameter(distance):
+            distance = max(0.0, min(total, distance))
+            i = min(127, max(0, bisect_right(lengths, distance) - 1))
+            span = lengths[i + 1] - lengths[i]
+            return (i + ((distance - lengths[i]) / span if span else 0)) / 128
+
+        for i, distance in enumerate((orientation_depths[0], total - orientation_depths[1])):
+            if orientation_depths[i] > 0:
+                inner = _bezier_split(points, parameter(distance))[0][-1]
+                endpoint = start if i == 0 else end
+                delta = (endpoint[0] - inner[0], endpoint[1] - inner[1])
+                if math.hypot(*delta) > 1e-12:
+                    directions[i] = delta
+        keep_body = sum(depths) < total
+        if keep_body:
+            t0, t1 = parameter(depths[0]), parameter(total - depths[1])
+            left = _bezier_split(points, t1)[0]
+            trimmed = _bezier_split(left, t0 / t1)[1] if t1 else left
+            for coordinate, point in zip(coordinates, trimmed):
+                coordinate.set_atom_at(1, _format_float(point[0]))
+                coordinate.set_atom_at(2, _format_float(point[1]))
+    else:
+        lengths = [math.hypot(*direction) for direction in directions]
+        keep_body = all(depth == 0 or depth < length for depth, length in zip(depths, lengths))
+        if len(points) == 2:
+            keep_body = keep_body and sum(depths) < lengths[0]
+        if keep_body:
+            for coordinate, point, direction, length, depth in zip(
+                    (coordinates[0], coordinates[-1]), (start, end), directions, lengths, depths):
+                if length and depth:
+                    coordinate.set_atom_at(1, _format_float(point[0] - direction[0] * depth / length))
+                    coordinate.set_atom_at(2, _format_float(point[1] - direction[1] * depth / length))
+    directions = [(x / math.hypot(x, y), y / math.hypot(x, y)) if math.hypot(x, y) else (1.0, 0.0)
+                  for x, y in directions]
+    return (start, end), directions, keep_body
+
+
+def bake_line_endings(root, kind, target):
+    pcb = kind in {'board', 'footprint'}
+    # Cached library graphics in a schematic are parsed using its enclosing version.
+    boundary = 20260710 if kind == 'symbol-library' else 20260818
+    if target >= boundary:
+        return 0
+    converted = 0
+    additional_members = {}
+
+    def visit(parent):
+        nonlocal converted
+        children = []
+        for node in parent.children:
+            if node.atom is not None:
+                children.append(node)
+                continue
+            endings = [node.child_list('start_shape'), node.child_list('end_shape')]
+            if not any(endings):
+                visit(node)
+                children.append(node)
+                continue
+            if all(not ending or ending.atom_at(1) == 'none' for ending in endings):
+                _remove_direct_children(node, {'start_shape', 'end_shape'})
+                children.append(node)
+                continue
+            stroke = node.child_list('stroke')
+            line_width = _child_float(stroke, 'width', 0.0) if stroke else _child_float(node, 'width', 0.0)
+            if not pcb and line_width <= 0:
+                line_width = 0.1524  # Default schematic graphic stroke: 6 mil.
+            parameters = [_ending_parameters(e, line_width) for e in endings]
+            identity = node.child_list('uuid') or node.child_list('tstamp')
+            original_id = identity.atom_at(1) if identity else ''
+            seed = original_id or hashlib.sha256(format_sexpr(node).encode('utf-8')).hexdigest()
+            endpoints, directions, keep_body = _line_ending_body(node, parameters)
+            _remove_direct_children(node, {'start_shape', 'end_shape'})
+            replacements = [node] if keep_body else []
+            converted += 1
+            for ending, params, point, direction in zip(endings, parameters, endpoints, directions):
+                style, (length, width), border, _, _ = params
+                if style == 'none':
+                    continue
+                if style == 'arrow':
+                    local = [(0, 0), (-length, width / 2), (-length, -width / 2), (0, 0)]
+                elif style == 'arrow_open':
+                    local = [(-length, -width / 2), (0, 0), (-length, width / 2)]
+                elif style == 'square':
+                    local = [(length / 2, width / 2), (length / 2, -width / 2),
+                             (-length / 2, -width / 2), (-length / 2, width / 2), (length / 2, width / 2)]
+                else:
+                    local = [(length / 2 * math.cos(i * math.tau / 32),
+                              width / 2 * math.sin(i * math.tau / 32)) for i in range(33)]
+                dx, dy = direction
+                polygon = [(point[0] + x * dx - y * dy, point[1] + x * dy + y * dx) for x, y in local]
+                is_open = style == 'arrow_open'
+                width = border or (line_width if is_open else 0.0)
+                prefix = 'fp_' if node.head().startswith('fp_') else 'gr_'
+                paths = list(zip(polygon, polygon[1:])) if pcb and is_open else [polygon]
+                for path in paths:
+                    head = prefix + ('line' if is_open else 'poly') if pcb else 'polyline'
+                    graphic = sexpr_list(atom(head))
+                    if not pcb and any(c.atom == 'private' for c in node.children):
+                        graphic.children.append(atom('private'))
+                    if pcb and is_open:
+                        for token, xy in zip(('start', 'end'), path):
+                            graphic.children.append(sexpr_list(atom(token), atom(_format_float(xy[0])), atom(_format_float(xy[1]))))
+                    else:
+                        graphic.children.append(sexpr_list(atom('pts'), *[_xy_node(xy) for xy in path]))
+                    ending_stroke = ending.child_list('stroke')
+                    stroke_type = ending_stroke.child_list('type') if ending_stroke else None
+                    graphic.children.append(sexpr_list(atom('stroke'), sexpr_list(atom('width'), atom(_format_float(width))),
+                                                      sexpr_list(atom('type'), atom(stroke_type.atom_at(1) if stroke_type else 'solid'))))
+                    color = stroke.child_list('color') if stroke else None
+                    if color:
+                        graphic.child_list('stroke').children.append(_clone_node(color))
+                    if not pcb:
+                        graphic.children.append(sexpr_list(atom('fill'), sexpr_list(atom('type'), atom('none' if is_open else 'outline'))))
+                    elif not is_open:
+                        graphic.children.append(sexpr_list(atom('fill'), atom('solid')))
+                    for child in node.children:
+                        if child.head() in {'layer', 'locked', 'net', 'solder_mask_margin', 'custom_property'}:
+                            graphic.children.append(_clone_node(child))
+                    if (pcb and parent.head() != 'primitives') or identity:
+                        new_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'kicad-backport:{}:{}:{}'.format(seed, converted, len(replacements))))
+                        graphic.children.append(sexpr_list(atom('uuid'), atom(new_id, True)))
+                    replacements.append(graphic)
+            if identity and replacements:
+                if not keep_body:
+                    _remove_direct_children(replacements[0], {'uuid', 'tstamp'})
+                    replacements[0].children.append(_clone_node(identity))
+                extra_ids = [n.child_list('uuid').atom_at(1) for n in replacements[1:] if n.child_list('uuid')]
+                additional_members[original_id] = extra_ids
+            children.extend(replacements)
+        parent.children = children
+
+    visit(root)
+    if additional_members:
+        for node in _walk(root):
+            if node.head() not in {'group', 'generated'}:
+                continue
+            members = node.child_list('members')
+            if members:
+                extras = [extra for member in members.children[1:] for extra in additional_members.get(member.atom, [])]
+                members.children.extend(atom(extra, True) for extra in extras)
+    return converted
+
+
+def downgrade_via_generators(root, target):
+    counts = {}
+    for node in _walk(root):
+        if node.head() != 'generated':
+            continue
+        kind = node.child_list('type')
+        name = kind.atom_at(1) if kind else ''
+        boundary = {'via_stitch': 20260816, 'via_stack': 20260830}.get(name)
+        if boundary is None or target >= boundary:
+            continue
+        label = node.child_list('name')
+        # Physical members are independent board items. Preserve the group's UUID
+        # so parent groups still refer to it; discard templates, NOT actual vias.
+        children = [atom('group'), atom(label.atom_at(1) if label else name, True)]
+        children.extend(c for c in node.children if c.head() in {'uuid', 'id', 'locked', 'members', 'custom_property'})
+        node.children = children
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def apply_nightly_downgrade(doc, target):
+    warnings = []
+    root = doc.root
+    source = int(doc.version) if _is_number(doc.version) else 0
+    pcb = doc.kind in {'board', 'footprint'}
+    _warn_if_changed(warnings, migrate_bold_stroke_widths(root, doc.kind, source, target),
+                     'migrated bold stroke base widths to legacy effective widths')
+    if pcb:
+        for name, count in downgrade_via_generators(root, target).items():
+            warnings.append('downgraded {} {} generator(s) to groups; retained physical vias/tracks, lost regeneration settings'.format(count, name))
+    _warn_if_changed(warnings, bake_line_endings(root, doc.kind, target),
+                     'baked line ending shapes into compatible graphics and shortened bodies; circles use 32 segments, Bezier length/orientation is approximated')
+    if target < (20260831 if pcb else 20260830):
+        _warn_if_changed(warnings, remove_descendants_by_head(root, {'custom_property'}),
+                         'removed custom user properties unsupported by the target; normal symbol/footprint fields retained')
+    if pcb and target < 20260828:
+        count = remove_atoms_from_headed_lists(root, {'attr'}, {'exclude_from_sim'})
+        count += remove_children_from_parents(root, {'variant'}, {'exclude_from_sim'})
+        _warn_if_changed(warnings, count, 'removed footprint and variant simulation exclusion flags unsupported by the target')
+    return warnings
+
+
+def project_nightly_warnings(text, target):
+    if target >= 20260831:
+        return []
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []  # Existing project-copy behavior; do not rewrite opaque data.
+    warnings = set()
+    stack = [data]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+            if target < 20260830 and item.get('via_stack_presets'):
+                warnings.add('preserved microvia stack presets in project JSON, but the target cannot use these presets')
+            if target < 20260819 and item.get('filter_scope') in ('visible', 'all'):
+                warnings.add('preserved BOM filter_scope in project JSON, but the target filters references only; review BOM export results')
+            ipc = item.get('ipc2581')
+            if target < 20260827 and isinstance(ipc, dict) and any(ipc.get(k) for k in ('mode', 'sections', 'net_names', 'ref_des')):
+                warnings.add('preserved IPC-2581 export selection in project JSON, but the target may export a different selection')
+    return sorted(warnings)
+
+
+def downgrade_design_rules(text, target):
+    """Surgically remove unsupported constraints; DRU is a commented multi-root file."""
+    unsupported = {'microvia_stack_depth', 'microvia_aspect_ratio'} if target < 20260830 else set()
+    if not unsupported or not any(name in text for name in unsupported):
+        return text, []
+    forms, stack = [], []
+    # Strings and # comments are opaque, including their parentheses and escapes.
+    for match in re.finditer(r'#[^\r\n]*|"(?:\\.|[^"\\])*"|\(|\)|[^\s()"#]+', text):
+        token = match.group()
+        if token.startswith('#'):
+            continue
+        if token == '(':
+            form = {'start': match.start(), 'end': None, 'atoms': [], 'children': []}
+            (stack[-1]['children'] if stack else forms).append(form)
+            stack.append(form)
+        elif token == ')':
+            if not stack:
+                raise ValueError('unbalanced design-rules file')
+            stack.pop()['end'] = match.end()
+        elif stack:
+            stack[-1]['atoms'].append(token)
+    if stack:
+        raise ValueError('unbalanced design-rules file')
+    removals, warnings = [], []
+    for rule in forms:
+        if not rule['atoms'] or rule['atoms'][0] != 'rule':
+            continue
+        constraints = [c for c in rule['children'] if c['atoms'] and c['atoms'][0] == 'constraint']
+        removed = [c for c in constraints if len(c['atoms']) > 1 and c['atoms'][1] in unsupported]
+        if not removed:
+            continue
+        name = rule['atoms'][1] if len(rule['atoms']) > 1 else '<unnamed>'
+        types = ', '.join(sorted({c['atoms'][1] for c in removed}))
+        warnings.append('removed unsupported DRC constraint(s) {} from rule {}; these manufacturing checks will NOT run in the target'.format(types, name))
+        removals.extend([rule] if len(removed) == len(constraints) else removed)
+    for form in sorted(removals, key=lambda item: item['start'], reverse=True):
+        text = text[:form['start']] + text[form['end']:]
+    return text, warnings
+
+
 def apply_downgrade_rules(doc, target):
     root = doc.root
     source = int(doc.version) if _is_number(doc.version) else 0
-    warnings = []
+    warnings = apply_nightly_downgrade(doc, target) if doc.kind in {'board', 'footprint', 'schematic', 'symbol-library'} else []
     if doc.kind == 'symbol-library':
         child_removals = []
         if target < 20260508:
@@ -3070,6 +3425,7 @@ def apply_downgrade_rules(doc, target):
         _queue_child_removal(child_removals, target < 20250909, {'footprint', 'module'}, {'units'}, 'removed footprint unit pin grouping fields')
         _apply_when(warnings, target <= 20221018, lambda: remove_atoms_from_headed_lists(root, {'attr'}, {'dnp'}), 'removed footprint dnp attributes')
         _apply_when(warnings, target <= 20221018, lambda: remove_atoms_from_headed_lists(root, {'attr'}, {'allow_missing_courtyard'}), 'removed legacy-incompatible footprint attr flags')
+        _queue_child_removal(child_removals, target < 20250302, {'setup'}, {'zone_defaults'}, 'removed per-layer zone hatch defaults unsupported by the target')
         _queue_child_removal(child_removals, target < 20250309, {'placement'}, {'component_class'}, 'removed rule_area component_class placement sources')
         _apply_when(warnings, target < 20250222, lambda: downgrade_shape_hatch_fills(root), 'downgraded PCB shape hatch fills')
         _queue_child_removal(child_removals, target < 20250210, {'gr_text_box', 'fp_text_box'}, {'knockout'}, 'removed PCB text box knockout fields')
@@ -3137,6 +3493,8 @@ def apply_upgrade_rules(doc, target):
     def warn(count, message):
         if count > 0:
             warnings.append(message)
+    if doc.kind in {'board', 'footprint', 'schematic', 'symbol-library'}:
+        warn(migrate_bold_stroke_widths(root, doc.kind, source, target), 'migrated legacy bold stroke widths to base widths')
     schematic_tstamp_parents = {'symbol', 'sheet', 'junction', 'no_connect', 'wire', 'bus', 'polyline', 'text', 'text_box', 'label', 'global_label', 'hierarchical_label', 'directive_label', 'image', 'sheet_instances', 'path', 'instance', 'property'}
     board_tstamp_parents = {'footprint', 'module', 'pad', 'via', 'segment', 'arc', 'zone', 'group', 'generated', 'gr_line', 'gr_arc', 'gr_circle', 'gr_rect', 'gr_poly', 'gr_curve', 'gr_text', 'fp_line', 'fp_arc', 'fp_circle', 'fp_rect', 'fp_poly', 'fp_curve', 'fp_text', 'dimension'}
     bool_heads = {'hide', 'bold', 'italic', 'locked', 'free', 'remove_unused_layers', 'keep_end_layers', 'suppress_zeroes', 'keep_text_aligned'}
@@ -3222,28 +3580,11 @@ def copy_project_tree(input_path, output_path, target):
         is_document = is_kicad_document_path(path)
         report = None
         if ext == '.kicad_dru':
-            doc = load_document(path)
-            try:
-                target_version = resolve_target_version('design-rules', target)
-            except ValueError:
-                report = _report(
-                    out,
-                    'design-rules',
-                    doc.version,
-                    'unsupported',
-                    False,
-                    ['skipped design-rules file because the target KiCad {} format does not support .kicad_dru'.format(target)],
-                )
-                copied.append(ProjectCopyEntry(path, out, False, report))
-                continue
-            if doc.version and doc.version != target_version:
-                raise ValueError(
-                    'design-rules conversion is not implemented for {} from version {} to {}'.format(
-                        path, doc.version, target_version
-                    )
-                )
-            report = _report(out, 'design-rules', doc.version, target_version, False)
-            is_document = False
+            # Use the same capability checks as single-file conversion, including
+            # constraints added without a DRU version bump.
+            report = normalize_file(path, out, target)
+            copied.append(ProjectCopyEntry(path, out, False, report))
+            continue
         if is_document:
             out = with_target_family_extension(out, target)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -6456,11 +6797,13 @@ def _sexpr_schematic_to_legacy(doc, target_major, warnings):
 def convert_sexpr_to_legacy_text(doc, target_major):
     warnings = ['converted S-expression document to a minimal KiCad legacy file; detailed legacy record conversion is still limited']
     if doc.kind == 'schematic':
-        warnings = []
+        warnings = apply_nightly_downgrade(doc, 0)
+        if any('line ending' in warning for warning in warnings):
+            warnings.append('legacy schematic note drawings cannot retain line ending fills or individual stroke styles')
         text = _sexpr_schematic_to_legacy(doc, target_major, warnings)
         return (text, 'legacy-schematic', warnings, None)
     if doc.kind == 'symbol-library':
-        warnings = []
+        warnings = apply_nightly_downgrade(doc, 0)
         text, dcm = _sexpr_symbol_library_to_legacy(doc, target_major, warnings)
         return (text, 'legacy-symbol-library', warnings, dcm)
     if doc.kind == 'project':
@@ -6471,11 +6814,14 @@ def convert_sexpr_to_legacy_text(doc, target_major):
 def normalize_file(input_path, output_path, target):
     doc = load_document(input_path)
     report = FileReport(str(output_path), doc.kind, doc.version)
+    known = TARGET_VERSIONS['10.99'].get(doc.kind)
+    if known and _is_number(doc.version) and int(doc.version) > int(known):
+        report.warnings.append('source format {} is newer than the verified {} format {}; unknown features may not be compatible'.format(doc.version, doc.kind, known))
     target_major = target_major_version(target)
     if doc.kind.startswith('legacy-'):
         if target_major <= 5:
             text, warnings = rewrite_legacy_text_for_target(doc, target_major)
-            report.warnings = warnings
+            report.warnings.extend(warnings)
             report.target_version = legacy_target_version_for_kind(doc.kind, target_major)
             report.changed = True
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -6490,7 +6836,7 @@ def normalize_file(input_path, output_path, target):
             raise ValueError('legacy KiCad conversion is not defined for this target')
         text, warnings = convert_legacy_to_sexpr_text(doc, resolved, target_kind)
         report.kind = target_kind
-        report.warnings = warnings
+        report.warnings.extend(warnings)
         report.target_version = resolved
         report.changed = True
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -6499,7 +6845,7 @@ def normalize_file(input_path, output_path, target):
     if target_major <= 5 and doc.kind in LEGACY_KIND_FOR_SEXPR:
         text, target_kind, warnings, dcm_text = convert_sexpr_to_legacy_text(doc, target_major)
         report.kind = target_kind
-        report.warnings = warnings
+        report.warnings.extend(warnings)
         report.target_version = legacy_target_version_for_kind(doc.kind, target_major)
         report.changed = True
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -6522,12 +6868,19 @@ def normalize_file(input_path, output_path, target):
                     input_path, doc.version, resolved
                 )
             )
-        if input_path.resolve() != output_path.resolve():
+        text, warnings = downgrade_design_rules(doc.raw_text, int(resolve_target_version('board', target)))
+        report.warnings.extend(warnings)
+        report.changed = text != doc.raw_text
+        if report.changed:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_text(output_path, text)
+        elif input_path.resolve() != output_path.resolve():
             output_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(input_path, output_path)
         report.target_version = resolved
         return report
     if doc.kind == 'project':
+        report.warnings.extend(project_nightly_warnings(doc.raw_text, int(resolve_target_version('board', target))))
         if input_path.resolve() != output_path.resolve():
             output_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(input_path, output_path)
@@ -6543,7 +6896,7 @@ def normalize_file(input_path, output_path, target):
         report.target_version = resolved
         return report
     if source and source < target_int:
-        report.warnings = apply_upgrade_rules(doc, target_int)
+        report.warnings.extend(apply_upgrade_rules(doc, target_int))
     else:
         if source and source > target_int and doc.kind in {'board', 'footprint'}:
             report.warnings.extend(externalize_embedded_models_for_legacy_targets(doc, output_path))

@@ -2,7 +2,7 @@
 
 Copyright (C) 问星/askstar
 
-Version 0.4.5
+Version 0.4.6
 
 KiCad Backport creates a compatibility copy of a KiCad project or file for an
 older KiCad target version. It is designed for practical downgrade and upgrade
@@ -13,6 +13,12 @@ The converter core is implemented in pure Python and runs in-process for normal
 plugin use. KiCad 5-era Python launches the same GUI through an external Python
 3 interpreter so the conversion engine can still be used from old KiCad
 installations.
+
+The plugin runtime (converter, GUI launcher, and command line) supports **Python
+3.8 and later**. KiCad 6 installations with Python 3.8 or later can run the
+converter in-process. KiCad 5's external Python must also be 3.8 or later. Packaging/schema-validation tools have separate
+build dependencies in `requirements-dev.txt`; these are not plugin runtime
+requirements and do not need to be installed into KiCad's Python.
 
 ## Translations
 
@@ -68,9 +74,9 @@ The GUI target list is:
 - KiCad 4
 
 The conversion core also accepts raw numeric development-format targets, including
-checkpoints from `20260410` through the current `20260728` board/footprint
+checkpoints from `20260410` through the current `20260831` board/footprint
 format.  The bundled 10.99 profile currently writes symbol libraries at
-`20260629`, schematics at `20260722`, and boards/footprints at `20260728`.
+`20260830`, schematics at `20260830`, and boards/footprints at `20260831`.
 
 For targets that predate these 10.99 additions, native ellipses are approximated
 with compatible polylines/polygons and footprint affine transforms are baked
@@ -81,9 +87,19 @@ in the JSON conversion report. Embedded PNG reference images are rescaled when
 crossing the corrected-PPI format boundary (`20260623`) to retain their rendered
 size.
 
+
+The verified nightly snapshot is KiCad master `be90a7e200` (2026-09-07).
+New line endings are baked into compatible geometry, new via generators become
+ordinary groups without deleting their physical vias, and bold stroke widths
+are migrated in both directions across `20260826`. Unsupported custom properties,
+footprint simulation flags, and microvia DRC constraints produce explicit loss
+warnings. DRC checks apply to both individual files and project conversions.
+Later, unverified source-format versions produce a warning rather than an
+unqualified compatibility claim. See [nightly compatibility and validation](docs/nightly-format-support.md).
+
 Supported input families include:
 
-- Current KiCad 10.99 nightly files
+- KiCad 10.99 nightly files through the verified 2026-09-07 snapshot
 - KiCad 10, 9, 8, 7, 6, and 5 files
 - KiCad legacy `.sch`, `.lib`, `.dcm`, and `.pro` files
 
@@ -120,7 +136,7 @@ configuration path to the external Python 3 process.
 
 ### Recommended: KiCad 6–10.99 PCM
 
-Install `kicad-backport-v0.4.5-PCM.zip` using **Plugin and Content Manager → Install from File**,
+Install `kicad-backport-v0.4.6-PCM.zip` using **Plugin and Content Manager → Install from File**,
 then restart KiCad. For updates, add the publisher's live `repository.json` URL in Manage Repositories.
 Local ZIP installation alone does not subscribe to updates. API-enabled KiCad 9+ needs a configured
 Python with Tk/wx; KiCad 10.99 requires the API. See the [PCM installation and release guide](docs/pcm-installation.md)

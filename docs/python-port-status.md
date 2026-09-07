@@ -187,8 +187,8 @@ in `E:\WORKS\MY\kicadProject\kicad-backport-cplus`.
   `filled_areas_thickness`, and generated dimension stroke cleanup.
 - V6/V7/V8 `.kicad_prl` compatibility files now use legacy numeric visible
   item IDs, normalized visible-layer masks, and meta version `3`.
-- Core Python sources parse as Python 3.6 syntax so KiCad 5-era Python 3
-  runtimes do not fail on modern type-hint syntax at import time.
+- Runtime sources are checked against Python 3.8 syntax. The plugin's minimum
+  supported Python version, including KiCad 5's external interpreter, is 3.8.
 - The legacy ActionPlugin entrypoint now imports under the local KiCad 5.0
   bundled Python 2.7 runtime and delegates the Python 3 GUI/core to an external
   Python 3 interpreter (`KICAD_BACKPORT_PYTHON`, `py -3`, `python3`, then

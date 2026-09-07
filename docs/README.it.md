@@ -5,7 +5,7 @@
 
 Copyright (C) askstar
 
-Versione 0.4.5
+Versione 0.4.6
 
 KiCad Backport crea una copia compatibile di un progetto o file KiCad per una
 versione KiCad di destinazione precedente. E pensato per flussi pratici di
@@ -75,7 +75,7 @@ formati di sviluppo board/footprint come `20260603` e `20260521`.
 
 Le famiglie di input supportate includono:
 
-- File nightly KiCad 10.99 correnti
+- File nightly KiCad 10.99 fino allo stato verificato del 7 settembre 2026 ([compatibilità](nightly-format-support.md))
 - File KiCad 10, 9, 8, 7, 6 e 5
 - File KiCad legacy `.sch`, `.lib`, `.dcm` e `.pro`
 

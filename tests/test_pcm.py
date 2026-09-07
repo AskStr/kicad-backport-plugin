@@ -44,7 +44,7 @@ class PcmTests(unittest.TestCase):
 
     def publish(self, archive=None, **kwargs):
         options = dict(archive_path=archive or self.archive, output_dir=self.directory / 'repo',
-                       base_url='https://example.org/pcm', download_url='https://example.org/releases/0.4.5.zip')
+                       base_url='https://example.org/pcm', download_url='https://example.org/releases/0.4.6.zip')
         options.update(kwargs)
         return build_repository(**options)
 
@@ -81,7 +81,7 @@ class PcmTests(unittest.TestCase):
 
     def test_isolated_installed_cli(self):
         result = subprocess.run([sys.executable, '-E', str(self.installed/'plugin/plugin.py'), '--list-targets'],
-                                cwd=self.directory, capture_output=True, text=True, timeout=30)
+                                cwd=self.directory, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn('10.0', result.stdout)
 
@@ -112,7 +112,7 @@ print(len(registered))
 '''
         result = subprocess.run([sys.executable, '-I', '-B', '-c', code, str(self.installed.parent), self.installed.name,
                                  str(config_root), version, str(settings_manager)],
-                                cwd=self.directory, capture_output=True, text=True, timeout=30)
+                                cwd=self.directory, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
         self.assertEqual(0, result.returncode, result.stderr)
         return int(result.stdout.strip())
 
@@ -133,7 +133,7 @@ print(len(registered))
     def test_ipc_only_import(self):
         code = "import sys,importlib;sys.path.insert(0,sys.argv[1]);sys.modules['pcbnew']=None;importlib.import_module(sys.argv[2])"
         result = subprocess.run([sys.executable, '-I', '-c', code, str(self.installed.parent), self.installed.name],
-                                capture_output=True, text=True, timeout=30)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
         self.assertEqual(0, result.returncode, result.stderr)
 
     def test_platform_config_and_active_version_isolation(self):
@@ -180,7 +180,7 @@ print(len(registered))
         history_path.write_bytes(json_bytes(history))
         path = self.publish(timestamp=1788652801)
         releases = json.loads(history_path.read_bytes())['packages'][0]['versions']
-        self.assertEqual(['0.4.5','0.4.4'], [item['version'] for item in releases])
+        self.assertEqual(['0.4.6','0.4.4'], [item['version'] for item in releases])
         releases[0]['download_sha256'] = '0'*64
         history = json.loads(history_path.read_bytes())
         history['packages'][0]['versions'] = releases

@@ -36,7 +36,7 @@ class PackageTests(unittest.TestCase):
                 if format is not None:
                     command += ['--format', format]
                 # No shell=True: this also exercises paths outside the repo.
-                result = subprocess.run(command, cwd=base, capture_output=True, text=True, timeout=30)
+                result = subprocess.run(command, cwd=base, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
                 self.assertEqual(0, result.returncode, result.stderr)
                 output = source/'dist'
                 pcm = output/('kicad-backport-v' + version + '-PCM.zip')
@@ -59,12 +59,12 @@ class PackageTests(unittest.TestCase):
                     with tarfile.open(manual_tar, 'r:gz') as archive:
                         self.assertIn('kicad-backport/plugin.json', archive.getnames())
                 result = subprocess.run(command + ['--version', version], cwd=base,
-                                        capture_output=True, text=True, timeout=30)
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
                 self.assertEqual(0, result.returncode, result.stderr)
                 if has_pcm:
                     self.assertEqual(original, pcm.read_bytes())
                 result = subprocess.run(command + ['--version', '0.0.0'], cwd=base,
-                                        capture_output=True, text=True, timeout=30)
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
                 self.assertNotEqual(0, result.returncode)
                 self.assertIn('does not match', result.stderr)
                 if has_pcm:
@@ -75,14 +75,14 @@ class PackageTests(unittest.TestCase):
             base = Path(temp)
             archive = base/'release.zip'
             result = subprocess.run([sys.executable, str(ROOT/'package_plugin.py'), '--output', str(archive)],
-                                    cwd=base, capture_output=True, text=True, timeout=30)
+                                    cwd=base, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
             self.assertEqual(0, result.returncode, result.stderr)
             original = archive.read_bytes()
             result = subprocess.run([
                 sys.executable, str(ROOT/'package_repository.py'), '--archive', 'release.zip',
                 '--output', 'repository', '--base-url', 'https://example.org/pcm',
                 '--download-url', 'https://example.org/releases/release.zip',
-            ], cwd=base, capture_output=True, text=True, timeout=30)
+            ], cwd=base, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
             self.assertEqual(0, result.returncode, result.stderr)
             repository = json.loads((base/'repository/repository.json').read_bytes())
             packages = (base/'repository/packages.json').read_bytes()

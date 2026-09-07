@@ -61,7 +61,7 @@ python -m pip install -r requirements-dev.txt
 python package_plugin.py --format pcm
 ```
 
-上述命令产生 `dist/kicad-backport-v0.4.5-PCM.zip`。不加参数的 `python package_plugin.py` 默认仅生成 PCM ZIP。输出是可复现 ZIP：固定时间、权限和条目顺序。
+上述命令产生 `dist/kicad-backport-v0.4.6-PCM.zip`。不加参数的 `python package_plugin.py` 默认仅生成 PCM ZIP。输出是可复现 ZIP：固定时间、权限和条目顺序。
 源码 `plugin.json` 与 `plugin/backport_core.py` 的版本必须一致。支持 `--status testing` 等
 PCM 状态覆盖；默认 `stable`。同一输出文件已有不同内容时拒绝覆盖，正式发布后必须升版本。
 本地试验应使用 `--output dist/trial-PCM.zip` 等独立路径，不要复用正式版本文件。
@@ -94,7 +94,7 @@ python package_plugin.py --format all
 自己的最终公开地址；`--download-url` 必须指向 ZIP 原始字节，不能是 Release HTML 页面。
 
 ```sh
-python package_repository.py --archive dist/kicad-backport-v0.4.5-PCM.zip --output dist/pcm-repository --base-url https://askstr.github.io/kicad-backport-plugin/pcm --download-url https://github.com/AskStr/kicad-backport-plugin/releases/download/v0.4.5/kicad-backport-v0.4.5-PCM.zip
+python package_repository.py --archive dist/kicad-backport-v0.4.6-PCM.zip --output dist/pcm-repository --base-url https://askstr.github.io/kicad-backport-plugin/pcm --download-url https://github.com/AskStr/kicad-backport-plugin/releases/download/v0.4.6/kicad-backport-v0.4.6-PCM.zip
 ```
 
 生成器完全离线，生成：
@@ -153,7 +153,7 @@ PCM GUI 首次安装→联网更新→卸载全流程已实机通过。开发版
 
 ## English quick guide
 
-Use `kicad-backport-v0.4.5-PCM.zip` with **Plugin and Content Manager → Install from File**.
+Use `kicad-backport-v0.4.6-PCM.zip` with **Plugin and Content Manager → Install from File**.
 Do not unpack it. Restart KiCad afterwards. Remove old manual copies yourself to avoid duplicate actions.
 The unified package supports KiCad 6–10.99: legacy pcbnew/wx on 6–8 and API-disabled 9–10;
 Python API actions on API-enabled 9+. KiCad 10.99 requires the API and a usable Python environment with

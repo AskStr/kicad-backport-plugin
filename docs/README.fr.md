@@ -5,7 +5,7 @@
 
 Copyright (C) askstar
 
-Version 0.4.5
+Version 0.4.6
 
 KiCad Backport cree une copie compatible d'un projet ou fichier KiCad pour une
 ancienne version cible de KiCad. Il est concu pour des flux pratiques de
@@ -80,7 +80,7 @@ comme `20260603` et `20260521`.
 
 Les familles d'entree prises en charge incluent :
 
-- Les fichiers nightly KiCad 10.99 actuels
+- Les fichiers nightly KiCad 10.99 jusqu’à l’état vérifié du 7 septembre 2026 ([compatibilité](nightly-format-support.md))
 - Les fichiers KiCad 10, 9, 8, 7, 6 et 5
 - Les fichiers KiCad legacy `.sch`, `.lib`, `.dcm` et `.pro`
 

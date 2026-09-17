@@ -14,6 +14,13 @@ from package_plugin import ROOT
 
 
 class PackageTests(unittest.TestCase):
+    def test_release_workflow_recovers_draft_by_release_id(self):
+        workflow = (ROOT / '.github/workflows/pcm-release.yml').read_text(encoding='utf-8')
+        self.assertIn("f.write('RELEASE_DRAFT='", workflow)
+        self.assertIn("releases?per_page=100", workflow)
+        self.assertIn("'repos/' + repo + '/releases/' + str(release['id'])", workflow)
+        self.assertNotIn("'/releases/tags/' + tag", workflow)
+
     def test_python_only_packaging_from_another_directory(self):
         formats = (
             (None, True, False, False),

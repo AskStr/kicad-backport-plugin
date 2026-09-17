@@ -46,8 +46,8 @@ GitHub Actions 的 **Publish PCM update** 自动完成：
 4. 匿名验证固定订阅地址、每个版本的下载大小和 SHA-256。
 
 **补跑发布：**在 GitHub「Actions → Publish PCM update → Run workflow」输入现有标签。
-已发布标签会直接复用原 ZIP，不会偷偷重打包或覆盖安装包。工作流串行运行，拒绝将
-旧版本重新设为 latest。请不要再手动发布一个没有更新索引的“最新”Release。
+已发布标签会直接复用原 ZIP，不会偷偷重打包或覆盖安装包。未发布的失败 draft 会按
+Release ID 安全恢复并重新校验资产。工作流串行运行，拒绝将旧版本重新设为 latest。请不要再手动发布一个没有更新索引的“最新”Release。
 
 ### 本地打包也只需一条命令
 

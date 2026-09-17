@@ -48,11 +48,16 @@ jobs:
           key = lambda value: tuple(map(int, value.lstrip('Vv').split('.')))
           if key(latest) > key(tag):
               raise SystemExit('Refusing to publish an older tag as latest')
-          exists = any(r['tagName'] == tag for r in json.loads(Path('dist/releases.json').read_text()))
+          matches = [r for r in json.loads(Path('dist/releases.json').read_text()) if r['tagName'] == tag]
+          if len(matches) > 1:
+              raise SystemExit('Multiple releases found for tag')
+          exists = bool(matches)
+          draft = matches[0]['isDraft'] if matches else False
           with open(os.environ['GITHUB_ENV'], 'a') as f:
               f.write('LATEST=' + latest + '\n')
               f.write('ARCHIVE=kicad-backport-v' + version + '-PCM.zip\n')
               f.write('RELEASE_EXISTS=' + str(exists).lower() + '\n')
+              f.write('RELEASE_DRAFT=' + str(draft).lower() + '\n')
           PY
       - name: Build once and prepare all PCM metadata
         shell: bash
@@ -61,11 +66,12 @@ jobs:
           python -m pip install -r requirements-dev.txt
           # Fail closed: a download/authentication error must never erase history.
           gh release download "$LATEST" --pattern packages.json --pattern repository.json --dir dist/pcm-repository
-          if [[ "$RELEASE_EXISTS" == true ]]; then
+          if [[ "$RELEASE_EXISTS" == true && "$RELEASE_DRAFT" != true ]]; then
             # Never rebuild/replace an already-published version's ZIP.
             gh release download "$TAG" --pattern "$ARCHIVE" --dir dist
             python package_plugin.py --archive "dist/$ARCHIVE" --repository
           else
+            # A failed draft is unpublished and can be rebuilt deterministically.
             python package_plugin.py --repository
           fi
           python -m unittest discover -s tests
@@ -85,7 +91,15 @@ jobs:
           files = [Path('dist') / os.environ['ARCHIVE'], Path('dist/metadata.json'), Path('dist/icon.png')]
           files += [root / index[key]['url'].rsplit('/', 1)[1] for key in ('packages', 'resources')]
           files += [root / 'packages.json', root / 'repository.json']  # Root pointer LAST.
-          release = json.loads(subprocess.check_output(['gh', 'api', 'repos/' + repo + '/releases/tags/' + tag]))
+          def release_for_tag():
+              pages = json.loads(subprocess.check_output(
+                  ['gh', 'api', '--paginate', '--slurp', 'repos/' + repo + '/releases?per_page=100']))
+              matches = [release for page in pages for release in page if release['tag_name'] == tag]
+              if len(matches) != 1:
+                  raise SystemExit('Expected exactly one release for ' + tag)
+              return matches[0]
+
+          release = release_for_tag()
           assets = {a['name']: a for a in release['assets']}
           mutable = {'metadata.json', 'icon.png', 'packages.json', 'repository.json'}
           for path in files:
@@ -100,11 +114,13 @@ jobs:
                   command.append('--clobber')
               subprocess.run(command, check=True)
           # Check server-side digests before publishing a new draft.
-          release = json.loads(subprocess.check_output(['gh', 'api', 'repos/' + repo + '/releases/tags/' + tag]))
+          release = release_for_tag()
           assets = {a['name']: a for a in release['assets']}
           for path in files:
               assert assets[path.name]['digest'] == 'sha256:' + hashlib.sha256(path.read_bytes()).hexdigest()
+          subprocess.run(['gh', 'api', '--method', 'PATCH',
+                          'repos/' + repo + '/releases/' + str(release['id']),
+                          '-F', 'draft=false', '-f', 'make_latest=true'], check=True)
           PY
-          gh release edit "$TAG" --draft=false --latest
       - name: Verify anonymous PCM update downloads
         run: python scripts/pcm_repository_smoke.py --url "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/repository.json"

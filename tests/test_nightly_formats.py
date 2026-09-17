@@ -1,4 +1,4 @@
-"""Regression contract for KiCad master be90a7e200 (2026-09-07)."""
+"""Regression contract for KiCad master 5ba95b2054 (2026-09-17 UTC)."""
 import json
 import os
 from pathlib import Path
@@ -9,8 +9,40 @@ import unittest
 from plugin import backport_core as core
 
 
-BOARD = '(kicad_pcb (version {version}) (generator "pcbnew") (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (37 "F.SilkS" user)) {items})'
+BOARD = '(kicad_pcb (version {version}) (generator "pcbnew") (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (37 "F.SilkS" user) (36 "Dwgs.User" user "User.Drawings")) {items})'
 LINE = '(gr_line (start 10 10) (end 20 10) (stroke (width 0.2) (type solid)) (layer "F.Cu") (uuid "11111111-1111-4111-8111-111111111111") {ending})'
+
+
+CHART_ID = '22222222-2222-4222-8222-222222222222'
+MAP_ID = '33333333-3333-4333-8333-333333333333'
+CELL_ID = '44444444-4444-4444-8444-444444444444'
+DRILL_CHART = r'''(drill_chart
+ (uuid "22222222-2222-4222-8222-222222222222") (locked yes) (layer "Dwgs.User")
+ (filter (plated yes) (npth yes) (vias yes) (slots yes) (backdrill no) (castellated yes))
+ (units mm) (precision 3) (totals yes)
+ (column (id symbol) (name "Mark") (justify center) (width 10))
+ (row_shapes (column 0) (shape 0 2)) (row_keys (key 0 "plated-0.3"))
+ (column_count 1)
+ (border (external yes) (header yes) (stroke (width 0.1) (type solid)))
+ (separators (rows yes) (cols yes) (stroke (width 0.1) (type solid)))
+ (column_widths 10) (row_heights 5)
+ (cells (table_cell "0.300 mm / 2 holes" (start 10 10) (end 20 15)
+   (margins 0.5 0.5 0.5 0.5) (span 1 1) (layer "Dwgs.User")
+   (effects (font (size 1 1) (thickness 0.15)))
+   (uuid "44444444-4444-4444-8444-444444444444")))
+ (custom_property "audit" "keep-on-recent-targets"))'''
+DRILL_MAP = '''(drill_map (uuid "33333333-3333-4333-8333-333333333333")
+ (locked yes) (layer "Dwgs.User") (offset 30 0) (size 2)
+ (span "F.Cu" "B.Cu" npth) (outline_slots yes) (guide_cross yes))'''
+DRILL_PROFILE = '''(setup (drill_symbol_profile (name "Fab") (group_by size plating)
+ (default_marks shapes) (size 2) (width 0.15) (freeze_assignments yes)
+ (assignment (key "plated-0.3") (mark shape 2) (descr "small holes"))))'''
+DRILL_VIA = '''(via (at 5 5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")
+ (uuid "55555555-5555-4555-8555-555555555555"))'''
+DRILL_GROUP = '''(group "Drilling" (uuid "66666666-6666-4666-8666-666666666666")
+ (members "22222222-2222-4222-8222-222222222222" "33333333-3333-4333-8333-333333333333"
+ "55555555-5555-4555-8555-555555555555"))'''
+DRILL_ITEMS = DRILL_PROFILE + DRILL_CHART + DRILL_MAP + DRILL_VIA + DRILL_GROUP
 
 
 class NightlyFormatsTests(unittest.TestCase):
@@ -39,15 +71,114 @@ class NightlyFormatsTests(unittest.TestCase):
         self.assertTrue(any(fragment in w for w in report.get('warnings', [])), report)
 
     def test_profile_and_keep_latest(self):
-        for kind, version in [('board', '20260831'), ('footprint', '20260831'), ('schematic', '20260830'), ('symbol-library', '20260830')]:
+        for kind, version in [('board', '20260901'), ('footprint', '20260901'), ('schematic', '20260830'), ('symbol-library', '20260830')]:
             self.assertEqual(core.resolve_target_version(kind, '10.99'), version)
-        text = BOARD.format(version=20260831, items=LINE.format(ending='(end_shape arrow) (custom_property "key" "value")'))
+        text = BOARD.format(version=20260901, items=LINE.format(ending='(end_shape arrow) (custom_property "key" "value")'))
         out, report, _ = self.convert(text, target='10.99')
         self.assertEqual(out, text)
         self.assertFalse(report['changed'])
-        for date in ['20260710', '20260803', '20260816', '20260818', '20260826', '20260828', '20260830', '20260831']:
+        for date in ['20260710', '20260803', '20260816', '20260818', '20260826', '20260828', '20260830', '20260831', '20260901']:
             self.assertIn(date, core.DEVELOPMENT_FILE_TARGETS)
             self.assertEqual(core.resolve_target_version('design-rules', date), '1')
+
+    def test_drill_objects_preserved_at_format_boundary(self):
+        text = BOARD.format(version=20260901, items=DRILL_ITEMS)
+        for target in ('10.99', '20260901'):
+            with self.subTest(target=target):
+                out, report, _ = self.convert(text, target=target)
+                self.assertEqual(out, text)
+                self.assertFalse(report['changed'])
+                self.assertFalse(report.get('warnings'))
+        self.assertEqual(core.resolve_target_version('schematic', '20260901'), '20260830')
+        self.assertEqual(core.resolve_target_version('worksheet', '20260901'), '20231118')
+
+    def test_drill_chart_becomes_static_table(self):
+        for target in ('10.0', '9.0', '20260831'):
+            with self.subTest(target=target):
+                out, report, _ = self.board(DRILL_ITEMS, version=20260901, target=target)
+                root = core.parse_sexpr(out)
+                table = root.child_list('table')
+                self.assertIsNotNone(table)
+                if target == '9.0':
+                    self.assertIsNone(table.child_list('uuid'))
+                else:
+                    self.assertEqual(table.child_list('uuid').atom_at(1), CHART_ID)
+                self.assertEqual(table.child_list('locked').atom_at(1), 'yes')
+                self.assertEqual(table.child_list('layer').atom_at(1), 'Dwgs.User')
+                self.assertIn('0.300 mm / 2 holes', out)
+                self.assertIn(CELL_ID, out)
+                self.assertIn('(drill 0.3)', out)
+                self.assertEqual(len([n for n in root.children if n.head() == 'via']), 1)
+                for token in ('drill_chart', 'drill_map', 'drill_symbol_profile', 'row_shapes', 'row_keys'):
+                    self.assertNotIn('(' + token, out)
+                for token in ('filter', 'units', 'precision', 'totals', 'column'):
+                    self.assertIsNone(table.child_list(token))
+                members = root.child_list('group').child_list('members')
+                self.assertEqual(CHART_ID in [n.atom for n in members.children[1:]], target != '9.0')
+                self.assertNotIn(MAP_ID, out)
+                self.warning(report, 'static PCB table')
+                self.warning(report, 'symbol marks')
+                self.warning(report, 'drill map')
+                self.warning(report, 'drill symbol profile')
+                self.assertEqual(table.child_list('custom_property') is not None, target == '20260831')
+
+    def test_drill_objects_removed_for_pre_table_targets(self):
+        for target in ('4.0', '5.0', '6.0', '7.0', '8.0'):
+            with self.subTest(target=target):
+                out, report, _ = self.board(DRILL_ITEMS, version=20260901, target=target)
+                root = core.parse_sexpr(out)
+                for token in ('table', 'drill_chart', 'drill_map', 'drill_symbol_profile'):
+                    self.assertNotIn('(' + token, out)
+                for identifier in (CHART_ID, MAP_ID, CELL_ID):
+                    self.assertNotIn(identifier, out)
+                self.assertEqual(len([n for n in root.children if n.head() == 'via']), 1)
+                self.warning(report, 'removed drill chart')
+                group = root.child_list('group')
+                if group:
+                    self.assertEqual(len(group.child_list('members').children), 2)
+
+    def test_table_identity_boundary(self):
+        table = core.parse_sexpr(DRILL_CHART)
+        table.children[0].atom = 'table'
+        table.children = [n for n in table.children if n.head() not in {'filter', 'units', 'precision', 'totals', 'column', 'row_shapes', 'row_keys'}]
+        for target, keep_id in [('20250906', False), ('20250907', True)]:
+            out, report, _ = self.board(core.format_sexpr(table) + DRILL_GROUP, version=20260901, target=target)
+            root = core.parse_sexpr(out)
+            self.assertEqual(root.child_list('table').child_list('uuid') is not None, keep_id)
+            members = root.child_list('group').child_list('members')
+            self.assertEqual(CHART_ID in [n.atom for n in members.children[1:]], keep_id)
+            self.assertIn(CELL_ID, out)
+            if not keep_id:
+                self.warning(report, 'PCB table UUID')
+        footprint = '(footprint "Table" (version 20260901) (layer "F.Cu") ' + core.format_sexpr(table) + ')'
+        out, _, _ = self.convert(footprint, '.kicad_mod', target='9.0')
+        self.assertIsNone(core.parse_sexpr(out).child_list('table').child_list('uuid'))
+        out, _, _ = self.board(footprint, version=20260901, target='9.0')
+        self.assertIsNone(core.parse_sexpr(out).child_list('footprint').child_list('table').child_list('uuid'))
+        self.assertIn(CELL_ID, out)
+
+    def test_drill_conversion_does_not_strip_unrelated_fields(self):
+        text = DRILL_ITEMS + '(property "drill_map" "keep")'
+        out, _, _ = self.board(text, version=20260901)
+        self.assertIn('(property "drill_map" "keep")', out)
+        # Empty symbol payloads must not claim marks were lost.
+        chart = core.parse_sexpr(DRILL_CHART)
+        chart.children = [n for n in chart.children if n.head() != 'row_shapes']
+        _, report, _ = self.board(core.format_sexpr(chart), version=20260901)
+        self.assertFalse(any('symbol marks' in w for w in report.get('warnings', [])))
+
+    def test_zero_padded_bus_connectivity_warning(self):
+        for text, warn in [('DATA[00..03]', True), ('DATA[3..00]', True),
+                           ('DATA[0..3]', False), ('DATA[10..13]', False)]:
+            sch = '(kicad_sch (version 20260830) (generator "eeschema") (label "' + text + '" (at 0 0 0) (effects (font (size 1 1)))))'
+            out, report, _ = self.convert(sch, '.kicad_sch')
+            self.assertIn(text, out)
+            self.assertEqual(any('zero-padded bus' in w for w in report.get('warnings', [])), warn)
+        sch = '(kicad_sch (version 20260830) (generator "eeschema") (bus_alias "DATA" (members "D[00..03]")))'
+        _, report, _ = self.convert(sch, '.kicad_sch', target='5.0')
+        self.warning(report, 'zero-padded bus')
+        _, report, _ = self.convert(sch, '.kicad_sch', target='10.99')
+        self.assertFalse(any('zero-padded bus' in w for w in report.get('warnings', [])))
 
     def test_custom_properties_are_not_normal_fields(self):
         out, report, _ = self.board('(footprint "Test" (layer "F.Cu") (attr smd exclude_from_sim) (property "Value" "Keep") (custom_property "a" "b") (variant (name "A") (exclude_from_sim yes) (dnp yes)))')
@@ -305,7 +436,7 @@ class NightlyFormatsTests(unittest.TestCase):
         count = 0
         fixtures = ['via_stacks', 'line_ending_zone_flood/line_ending_zone_flood', 'line_ending_drc/line_ending_drc_fail']
         for fixture in fixtures:
-            text = subprocess.check_output(['git', '-C', os.environ['KICAD_SOURCE_REPO'], 'show', 'be90a7e200:qa/data/pcbnew/' + fixture + '.kicad_pcb']).decode('utf-8')
+            text = subprocess.check_output(['git', '-C', os.environ['KICAD_SOURCE_REPO'], 'show', '5ba95b2054:qa/data/pcbnew/' + fixture + '.kicad_pcb']).decode('utf-8')
             original_tracks = sum(n.head() in {'via', 'segment', 'arc'} for n in core.parse_sexpr(text).children)
             for version in ['4.0', '5.0', '6.0', '7.0', '8.0', '9.0', '10.0']:
                 candidates = [root / version / 'bin/python.exe', root / version / 'KiCad/bin/python.exe']
@@ -324,6 +455,50 @@ class NightlyFormatsTests(unittest.TestCase):
                     # Track arcs may become several segments on old targets, never disappear.
                     self.assertGreaterEqual(int(result.stdout.strip()), original_tracks)
                     count += 1
+        self.assertGreater(count, 0, 'No KiCad Python installation found under KICAD_NATIVE_ROOT')
+
+    @unittest.skipUnless(os.environ.get('KICAD1099_CLI'), 'Set KICAD1099_CLI for current nightly PCB load tests')
+    def test_native_current_nightly_drill_documentation(self):
+        text = BOARD.format(version=20260901, items=DRILL_ITEMS)
+        source = self.work / 'nightly-drill.kicad_pcb'
+        output = self.work / 'nightly-svg'
+        source.write_text(text, encoding='utf-8')
+        result = subprocess.run(
+            [os.environ['KICAD1099_CLI'], 'pcb', 'export', 'svg', '--mode-multi',
+             '--layers', 'Dwgs.User', '--output', str(output), str(source)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        svgs = list(output.glob('*.svg'))
+        self.assertEqual(len(svgs), 1)
+        self.assertGreater(svgs[0].stat().st_size, 0)
+
+    @unittest.skipUnless(os.environ.get('KICAD_NATIVE_ROOT'), 'Set KICAD_NATIVE_ROOT for native drill-documentation load tests')
+    def test_native_drill_documentation_matrix(self):
+        root = Path(os.environ['KICAD_NATIVE_ROOT'])
+        count = 0
+        for version in ('4.0', '5.0', '6.0', '7.0', '8.0', '9.0', '10.0'):
+            candidates = [root / version / 'bin/python.exe', root / version / 'KiCad/bin/python.exe']
+            python = next((p for p in candidates if p.exists()), None)
+            if python is None:
+                continue
+            with self.subTest(version=version):
+                _, _, path = self.board(DRILL_ITEMS, version=20260901, target=version)
+                probe = ('import pcbnew,sys\n'
+                         'b=pcbnew.LoadBoard(sys.argv[1])\n'
+                         'assert b is not None\n'
+                         't=b.GetTracks()\n'
+                         'assert (t.size() if hasattr(t,"size") else len(list(t))) == 1\n')
+                if int(version.split('.')[0]) >= 9:
+                    probe += ('tables=[d for d in b.GetDrawings() if d.GetClass()=="PCB_TABLE"]\n'
+                              'assert len(tables)==1\n'
+                              'pcbnew.SaveBoard(sys.argv[1]+".roundtrip", b)\n')
+                result = subprocess.run([str(python), '-c', probe, str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                if int(version.split('.')[0]) >= 9:
+                    saved = core.parse_sexpr(Path(str(path) + '.roundtrip').read_text(encoding='utf-8'))
+                    cells = saved.child_list('table').child_list('cells')
+                    self.assertEqual(cells.child_list('table_cell').atom_at(1), '0.300 mm / 2 holes')
+                count += 1
         self.assertGreater(count, 0, 'No KiCad Python installation found under KICAD_NATIVE_ROOT')
 
     @unittest.skipUnless(os.environ.get('KICAD10_PYTHON'), 'Set KICAD10_PYTHON for native PCB load tests')

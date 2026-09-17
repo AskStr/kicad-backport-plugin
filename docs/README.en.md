@@ -2,7 +2,11 @@
 
 Copyright (C) askstar
 
-Version 0.4.7
+Version 0.4.8
+
+Release 0.4.8 adds verified KiCad 10.99 board/footprint format `20260901`
+support, including drill charts/maps, safe static-table fallback, KiCad 9 table
+identity compatibility, and warnings for zero-padded bus connectivity semantics.
 
 KiCad Backport creates a compatibility copy of a KiCad project or file for an
 older KiCad target version. It is designed for practical downgrade and upgrade
@@ -74,9 +78,9 @@ The GUI target list is:
 - KiCad 4
 
 The conversion core also accepts raw numeric development-format targets, including
-checkpoints from `20260410` through the current `20260831` board/footprint
+checkpoints from `20260410` through the current `20260901` board/footprint
 format.  The bundled 10.99 profile currently writes symbol libraries at
-`20260830`, schematics at `20260830`, and boards/footprints at `20260831`.
+`20260830`, schematics at `20260830`, and boards/footprints at `20260901`.
 
 For targets that predate these 10.99 additions, native ellipses are approximated
 with compatible polylines/polygons and footprint affine transforms are baked
@@ -88,7 +92,7 @@ crossing the corrected-PPI format boundary (`20260623`) to retain their rendered
 size.
 
 
-The verified nightly snapshot is KiCad master `be90a7e200` (2026-09-07).
+The verified nightly snapshot is KiCad master `5ba95b2054` (2026-09-17 UTC).
 New line endings are baked into compatible geometry, new via generators become
 ordinary groups without deleting their physical vias, and bold stroke widths
 are migrated in both directions across `20260826`. Unsupported custom properties,
@@ -99,7 +103,7 @@ unqualified compatibility claim. See [nightly compatibility and validation](nigh
 
 Supported input families include:
 
-- KiCad 10.99 nightly files through the verified 2026-09-07 snapshot
+- KiCad 10.99 nightly files through the verified 2026-09-17 UTC snapshot
 - KiCad 10, 9, 8, 7, 6, and 5 files
 - KiCad legacy `.sch`, `.lib`, `.dcm`, and `.pro` files
 

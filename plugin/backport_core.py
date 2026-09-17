@@ -12,7 +12,7 @@ import uuid
 from bisect import bisect_right
 from pathlib import Path
 from typing import Callable, Iterable, Optional
-VERSION = '0.4.7'
+VERSION = '0.4.8'
 ESCAPES = {'n': '\n', 't': '\t', '"': '"', '\\': '\\'}
 
 class Node:
@@ -1036,8 +1036,8 @@ def detect_kind(path, top_level):
     if top_level in by_head:
         return by_head[top_level]
     return {'.pro': 'legacy-project', '.sch': 'legacy-schematic', '.lib': 'legacy-symbol-library', '.dcm': 'legacy-symbol-documentation', '.kicad_pro': 'project', '.kicad_sym': 'symbol-library', '.kicad_sch': 'schematic', '.kicad_pcb': 'board', '.kicad_mod': 'footprint', '.kicad_dru': 'design-rules', '.kicad_wks': 'worksheet'}.get(path.suffix.lower(), 'unknown')
-TARGET_VERSIONS = {'4.0': {'board': '4', 'footprint': '4'}, '5.0': {'board': '20171130', 'footprint': '20171130'}, '5.1': {'board': '20171130', 'footprint': '20171130'}, '6.0': {'symbol-library': '20211014', 'schematic': '20211123', 'board': '20211014', 'footprint': '20211014', 'worksheet': '20210606', 'design-rules': '1'}, '7.0': {'symbol-library': '20220914', 'schematic': '20230121', 'board': '20221018', 'footprint': '20221018', 'worksheet': '20220228', 'design-rules': '1'}, '8.0': {'symbol-library': '20231120', 'schematic': '20231120', 'board': '20240108', 'footprint': '20240108', 'worksheet': '20231118', 'design-rules': '1'}, '9.0': {'symbol-library': '20241209', 'schematic': '20250114', 'board': '20241229', 'footprint': '20241229', 'worksheet': '20231118', 'design-rules': '1'}, '10.0': {'symbol-library': '20251024', 'schematic': '20260306', 'board': '20260206', 'footprint': '20260206', 'worksheet': '20231118', 'design-rules': '1'}, '10.99': {'symbol-library': '20260830', 'schematic': '20260830', 'board': '20260831', 'footprint': '20260831', 'worksheet': '20231118', 'design-rules': '1'}}
-DEVELOPMENT_FILE_TARGETS = {'20260410', '20260508', '20260511', '20260512', '20260513', '20260521', '20260603', '20260616', '20260623', '20260624', '20260629', '20260710', '20260722', '20260728', '20260803', '20260816', '20260818', '20260826', '20260828', '20260830', '20260831'}
+TARGET_VERSIONS = {'4.0': {'board': '4', 'footprint': '4'}, '5.0': {'board': '20171130', 'footprint': '20171130'}, '5.1': {'board': '20171130', 'footprint': '20171130'}, '6.0': {'symbol-library': '20211014', 'schematic': '20211123', 'board': '20211014', 'footprint': '20211014', 'worksheet': '20210606', 'design-rules': '1'}, '7.0': {'symbol-library': '20220914', 'schematic': '20230121', 'board': '20221018', 'footprint': '20221018', 'worksheet': '20220228', 'design-rules': '1'}, '8.0': {'symbol-library': '20231120', 'schematic': '20231120', 'board': '20240108', 'footprint': '20240108', 'worksheet': '20231118', 'design-rules': '1'}, '9.0': {'symbol-library': '20241209', 'schematic': '20250114', 'board': '20241229', 'footprint': '20241229', 'worksheet': '20231118', 'design-rules': '1'}, '10.0': {'symbol-library': '20251024', 'schematic': '20260306', 'board': '20260206', 'footprint': '20260206', 'worksheet': '20231118', 'design-rules': '1'}, '10.99': {'symbol-library': '20260830', 'schematic': '20260830', 'board': '20260901', 'footprint': '20260901', 'worksheet': '20231118', 'design-rules': '1'}}
+DEVELOPMENT_FILE_TARGETS = {'20260410', '20260508', '20260511', '20260512', '20260513', '20260521', '20260603', '20260616', '20260623', '20260624', '20260629', '20260710', '20260722', '20260728', '20260803', '20260816', '20260818', '20260826', '20260828', '20260830', '20260831', '20260901'}
 # Keep this public name for callers that used the pre-10.99-development API.
 DEVELOPMENT_BOARD_TARGETS = DEVELOPMENT_FILE_TARGETS
 
@@ -3187,6 +3187,75 @@ def downgrade_via_generators(root, target):
     return counts
 
 
+def downgrade_drill_documentation(root, target):
+    """Keep cached chart cells where tables exist; never remove physical holes."""
+    if target >= 20260901:
+        return []
+    warnings = []
+    removed_ids = set()
+    kept = []
+    for node in root.children:
+        head = node.head()
+        if head == 'setup':
+            _warn_if_changed(warnings, _remove_direct_children(node, {'drill_symbol_profile'}),
+                             'removed drill symbol profile; drill mark assignments and export styling are not available in the target')
+        if head == 'drill_chart' and target >= 20240202:
+            shapes = node.child_list('row_shapes')
+            if shapes and any(n.head() == 'shape' for n in shapes.children):
+                warnings.append('removed drill chart symbol marks from row_shapes; cached table text remains, but the graphical symbol column must be recreated')
+            node.children[0].atom = 'table'
+            _remove_direct_children(node, {'filter', 'units', 'precision', 'totals', 'column', 'row_shapes', 'row_keys'})
+            warnings.append('converted drill chart to a static PCB table; retained cached cells and geometry, lost automatic hole counts and regeneration settings; review before fabrication')
+        elif head in {'drill_chart', 'drill_map'}:
+            for descendant in _walk(node):
+                identity = descendant.child_list('uuid') or descendant.child_list('tstamp')
+                if identity:
+                    removed_ids.add(identity.atom_at(1))
+            if head == 'drill_chart':
+                warnings.append('removed drill chart because the target has no PCB tables; hole documentation is lost, physical pads/vias are retained')
+            else:
+                warnings.append('removed drill map because the target cannot regenerate its symbols and board outline; physical pads/vias and their drills are retained')
+            continue
+        kept.append(node)
+    root.children = kept
+    # PCB tables gained their own UUID after KiCad 9. Cells already had UUIDs.
+    # Include ordinary tables inside footprints, not just converted board charts.
+    if target < 20250907:
+        for node in _walk(root):
+            if node.head() == 'table':
+                identity = node.child_list('uuid')
+                if identity:
+                    removed_ids.add(identity.atom_at(1))
+                    _remove_direct_children(node, {'uuid'})
+                    warnings.append('removed PCB table UUID and its group references unsupported by the target; table cells are retained where tables are supported')
+    if removed_ids:
+        for node in _walk(root):
+            if node.head() not in {'group', 'generated'}:
+                continue
+            members = node.child_list('members')
+            if members:
+                members.children = [n for n in members.children if n.atom not in removed_ids]
+    return warnings
+
+
+def schematic_bus_warnings(root):
+    # September 2026 changed bus expansion without changing the schematic version.
+    # Rewriting labels alone could disconnect matching scalar labels/sheet pins.
+    for node in _walk(root):
+        if node.head() in {'label', 'global_label', 'hierarchical_label', 'pin'}:
+            texts = [node.atom_at(1)]
+        elif node.head() == 'bus_alias':
+            members = node.child_list('members')
+            texts = [n.atom for n in members.children[1:] if n.is_atom] if members else []
+        else:
+            continue
+        for text in texts:
+            for match in re.finditer(r'\[([0-9]+)\.\.([0-9]+)\]', text):
+                if any(len(bound) > 1 and bound.startswith('0') for bound in match.groups()):
+                    return ['preserved zero-padded bus vectors, but older KiCad expands their members without leading zeros; net connectivity may change, review bus labels, aliases and sheet pins before use']
+    return []
+
+
 def apply_nightly_downgrade(doc, target):
     warnings = []
     root = doc.root
@@ -3195,6 +3264,7 @@ def apply_nightly_downgrade(doc, target):
     _warn_if_changed(warnings, migrate_bold_stroke_widths(root, doc.kind, source, target),
                      'migrated bold stroke base widths to legacy effective widths')
     if pcb:
+        warnings.extend(downgrade_drill_documentation(root, target))
         for name, count in downgrade_via_generators(root, target).items():
             warnings.append('downgraded {} {} generator(s) to groups; retained physical vias/tracks, lost regeneration settings'.format(count, name))
     _warn_if_changed(warnings, bake_line_endings(root, doc.kind, target),
@@ -3267,7 +3337,7 @@ def downgrade_design_rules(text, target):
             continue
         name = rule['atoms'][1] if len(rule['atoms']) > 1 else '<unnamed>'
         types = ', '.join(sorted({c['atoms'][1] for c in removed}))
-        warnings.append('removed unsupported DRC constraint(s) {} from rule {}; these manufacturing checks will NOT run in the target'.format(types, name))
+        warnings.append('removed unsupported DRC constraint(s) ' + '{} from rule {}; these manufacturing checks will NOT run in the target'.format(types, name))
         removals.extend([rule] if len(removed) == len(constraints) else removed)
     for form in sorted(removals, key=lambda item: item['start'], reverse=True):
         text = text[:form['start']] + text[form['end']:]
@@ -6818,6 +6888,8 @@ def normalize_file(input_path, output_path, target):
     if known and _is_number(doc.version) and int(doc.version) > int(known):
         report.warnings.append('source format {} is newer than the verified {} format {}; unknown features may not be compatible'.format(doc.version, doc.kind, known))
     target_major = target_major_version(target)
+    if doc.kind == 'schematic' and int(resolve_target_version('board', target)) < 20260901:
+        report.warnings.extend(schematic_bus_warnings(doc.root))
     if doc.kind.startswith('legacy-'):
         if target_major <= 5:
             text, warnings = rewrite_legacy_text_for_target(doc, target_major)

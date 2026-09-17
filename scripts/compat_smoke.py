@@ -22,7 +22,7 @@ from backport_core import (  # noqa: E402
 def main():
     work = Path(tempfile.mkdtemp(prefix="kicad_backport_plugin_smoke_"))
     try:
-        assert resolve_target_version("board", "10.99") == "20260831"
+        assert resolve_target_version("board", "10.99") == "20260901"
         assert resolve_target_version("board", "20260728") == "20260728"
         assert resolve_target_version("schematic", "20260521") == "20260830"
         assert resolve_target_version("symbol-library", "20260603") == "20260830"
@@ -68,7 +68,7 @@ def main():
         _out, _err, code = convert(modern_board, work / "modern_board_keep.kicad_pcb", "10.99")
         assert code == 0
         modern_board_keep = (work / "modern_board_keep_V10_99.kicad_pcb").read_text(encoding="utf-8")
-        assert "(version 20260831)" in modern_board_keep
+        assert "(version 20260901)" in modern_board_keep
         assert "(transform" in modern_board_keep and "(grid_item" in modern_board_keep and "(constraint" in modern_board_keep
 
         modern_board_report = work / "modern_board_report.json"
@@ -115,7 +115,7 @@ def main():
         _out, _err, code = convert(work / "modern_board_old_V10.kicad_pcb", work / "modern_board_up.kicad_pcb", "10.99")
         assert code == 0
         modern_board_up = (work / "modern_board_up_V10_99.kicad_pcb").read_text(encoding="utf-8")
-        assert "(version 20260831)" in modern_board_up
+        assert "(version 20260901)" in modern_board_up
         assert "(scale " not in modern_board_up
 
         modern_schematic = work / "modern_10_99.kicad_sch"
@@ -304,7 +304,7 @@ def main():
         _out, _err, code = convert(board_v5, work / "board_v5_to_latest.kicad_pcb", "10.99")
         assert code == 0
         board_v5_to_latest = (work / "board_v5_to_latest_V10_99.kicad_pcb").read_text(encoding="utf-8")
-        assert "(version 20260831)" in board_v5_to_latest
+        assert "(version 20260901)" in board_v5_to_latest
         assert '(net "N1")' in board_v5_to_latest
 
         _out, _err, code = convert(pcb, work / "board7_out.kicad_pcb", "7.0")

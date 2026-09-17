@@ -32,7 +32,8 @@ Round Tracks 已被官方收录，其用户省去了这一步；不能仅通过�
 
 所有当前发布版本的 PCM 兼容范围保持 `6.0`–`10.99`，标识符保持
 `com.askstar.kicad.backport`。同一版本重发不会触发更新提示；插件内容变更应提升版本号。
-这次对 V0.4.7 的修订只简化发布工具，已公开 ZIP 字节和下载哈希保持不变。
+V0.4.8 更新 KiCad 10.99 `20260901` 格式降级与原生验证；这是内容变更，
+必须使用新版本号和新归档，不能覆盖 V0.4.7。
 
 ## 维护者：不再手动拼 URL 或上传多个索引
 
@@ -67,10 +68,10 @@ python package_plugin.py --repository
 下载地址自动按本项目的 `V<版本>` 标签生成，历史自动合并。独立的
 `package_repository.py` 仍保留给自定义部署，不是日常必需步骤。
 
-V0.4.7 已经发布，不应因文档或打包工具修改而重建同版本 ZIP。复用已发布归档：
+V0.4.8 发布后不应因文档或打包工具修改而重建同版本 ZIP。复用已发布归档：
 
 ```sh
-python package_plugin.py --archive dist/kicad-backport-v0.4.7-PCM.zip --repository
+python package_plugin.py --archive dist/kicad-backport-v0.4.8-PCM.zip --repository
 ```
 
 `--format zip` / `--format all` 仍支持传统手动安装包。

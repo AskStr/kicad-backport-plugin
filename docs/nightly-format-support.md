@@ -2,11 +2,44 @@
 
 ## Verified snapshot / 核对基线
 
-- Date: **2026-09-07**.
-- Official KiCad master: `be90a7e20034bdbc902cc4a363998b5f8b6a2ca4`.
+- Date: **2026-09-17 UTC**.
+- Official KiCad master: `5ba95b2054efc54aeee48197f4a2d72e28ffbad8`.
 - Symbol library / schematic: **20260830**.
-- Board / footprint: **20260831**.
+- Board / footprint: **20260901**.
 - Worksheet: **20231118**; design rules: **1**.
+
+
+The local KiCad repository is now checked out on `master`, fast-forwarded to
+`origin/master`, with a clean working tree. It is not a shallow clone. The
+previous verified September 7 baseline `be90a7e200` is an ancestor of this
+snapshot, with **390 commits** in the full comparison range. Format review uses
+the serializer/parser and settings diff across that range, not a date-filtered
+subset of commits.
+
+本地源码已按用户要求切换并快进到 `master`，与 `origin/master` 一致且工作树干净。
+历史完整、非浅克隆；9 月 7 日基线之后的 390 个提交均在核对范围内。
+
+### Changes since the previous snapshot / 本次增量
+
+- `19174c2b8b` (September 11): PCB format `20260901` introduces
+  `drill_chart`, `drill_map`, and `setup.drill_symbol_profile`. Charts share the
+  ordinary table's cached cells/geometry; maps save generation parameters, not
+  pre-rendered graphics. The format date is **not** the feature's commit date.
+- PCB table UUIDs were introduced at `20250907`; KiCad 9 supports tables but
+  rejects that field. Converting a chart to a table therefore also requires
+  removing the table UUID and its group references on KiCad 9. Cell UUIDs remain.
+- `d939d0134c` (September 13): bus-vector expansion preserves leading zeros,
+  **without a schematic format-version bump**. For example, `DATA[00..03]`
+  now names `DATA00` through `DATA03`, not `DATA0` through `DATA3`. Older-target
+  conversions warn about connectivity rather than guessing a safe label rewrite.
+- Symbol/schematic format headers, worksheet and DRU versions are unchanged.
+  Jumper-group and grid-item refactoring does not introduce new serialized
+  syntax in this range; the inspected project settings changes require no new
+  JSON-schema rewrite.
+
+源码依据：`pcbnew/pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.{h,cpp}` 及对应 parser、
+`pcbnew/drill/drill_symbol_profile.cpp`、`eeschema/sch_file_versions.h`、
+`common/project/net_settings.cpp`，均来自上述固定提交。
 
 The `10.99` core target refers to this snapshot, not every historical or future
 nightly executable. Older nightlies may reject these version headers. Inputs
@@ -32,6 +65,12 @@ GUI。请阅读转换报告，特别是涉及铜层几何、制造约束和旧�
 | Microvia DRC constraints | Before 20260830, remove unsupported `microvia_stack_depth` / `microvia_aspect_ratio` constraints; keep supported constraints and surrounding comments; remove rules left without constraints / 删除不支持约束并明确提示这些制造检查不再执行 |
 | Project JSON settings | Preserve the JSON; warn about unavailable microvia presets and changed BOM/IPC-2581 export semantics / 保留 JSON，对预设和导出语义差异告警 |
 | Schematic polygons | Preserve compatible `polyline` geometry and explicit closure / 保留兼容多边形，不直接删除 |
+| `drill_chart` before `20260901` | KiCad 9/10: keep cached text/layout as a static `table`; before table support (`20240202`, including KiCad 4–8): remove with warning / 保留静态表格或删除并告警 |
+| Chart `row_shapes` / regeneration | Remove symbol-shape cache, filters and regeneration settings with explicit loss warnings; text-based marks remain in cached cells / 图形符号及自动更新能力丢失，文字缓存保留 |
+| PCB table UUID before `20250907` | Remove table UUID and its group references, including ordinary footprint tables; retain cell UUIDs / 兼容 KiCad 9 的表格解析器 |
+| `drill_map` / `drill_symbol_profile` before `20260901` | Remove unsupported map/profile and dangling group references; do not remove actual pads, vias or drills / 删除钻孔标记图及符号配置，不删除实体钻孔 |
+| Zero-padded schematic bus vectors | Preserve labels/aliases/sheet pins and warn on older snapshot targets, including legacy and same-header conversions / 保留文本并告警，不承诺旧版网络连接等价 |
+
 
 Line-ending conversion is a geometry approximation, not preservation of the
 parametric editing feature. Circles use 32 segments. Bezier length/orientation
@@ -117,25 +156,37 @@ $env:KICAD_NATIVE_ROOT = 'C:\KiCad'
 python -m unittest discover -s tests -p test_nightly_formats.py
 ```
 
-The pinned upstream PCB fixtures are `via_stacks.kicad_pcb`,
+The upstream PCB fixtures pinned to `5ba95b2054` are `via_stacks.kicad_pcb`,
 `line_ending_zone_flood/line_ending_zone_flood.kicad_pcb`, and
 `line_ending_drc/line_ending_drc_fail.kicad_pcb`, under `qa/data/pcbnew/`.
 Native tests check loading and preservation of track/via counts. Structural
 tests additionally check endpoints, fill, layer, UUIDs, group references,
 font-width round trips, source-file preservation, and project/DRU conversion.
 
-Verified on this machine: all 54 tests, including the optional native cases;
-21 upstream PCB conversions/loads across KiCad 4/5/6/7/8/9/10; schematic and
-symbol SVG exports in KiCad 7/8/9/10; existing compatibility, i18n, reference
-parity, real-fixture, and KiCad 5 smoke tests.
+Verified on this machine: **65 unit tests**, including the optional native
+cases and Python 3.8 grammar checks. Native checks include 21 pinned upstream
+PCB conversions/loads plus 7 drill-documentation conversions/loads across
+KiCad 4/5/6/7/8/9/10. KiCad 9/10 also re-save the static tables and verify their
+cached text. Compatibility, i18n, KiCad 5 board-load smoke tests and the
+7-case real-fixture smoke suite pass.
 
-**Verification limit:** the installed 10.99 executable is
-`10.99.0-2335-g1899bad41c`, predating these new formats. Latest-output version
-headers and preservation are verified against upstream source and structural
-tests, not by loading them in a matching current nightly executable. Native
-loading does not constitute exhaustive visual, electrical, DRC, or manufacturing
-validation, nor validation on every operating system.
+The separate C++ reference-message parity smoke also passes; the Python and C++
+implementations expose matching downgrade-warning prefixes for their shared
+rules.
 
-**验证边界：**本机 10.99 可执行文件早于新增格式；最新输出通过源码对照及结构测试
-验证，不能宣称已在匹配的最新 nightly 中原生加载。原生加载成功也不等于完整的
-视觉、电气、DRC 或制造验收，亦不代表所有操作系统均已验收。
+The updated installed KiCad 10.99 executable is commit
+`f7ca620278609187e348cc7bcc7eaf2b847e7ffc` (September 17 UTC) and declares
+PCB format `20260901`. It natively loads the drill-chart/map fixture and exports
+the documentation layer to SVG. The executable is slightly older than the
+pinned source commit, but both use the same board, schematic and symbol format
+versions covered here.
+
+**Verification limit:** native load/export and older-version round trips do not
+constitute exhaustive visual, electrical, DRC, or manufacturing validation, nor
+validation on every operating system. Drill charts downgraded to static tables
+must still be reviewed before fabrication because automatic regeneration and
+symbol marks are intentionally unavailable in older targets.
+
+**验证边界：**更新后的本机 10.99 已按 `20260901` 原生加载并导出钻孔文档夹具；
+但原生加载、导出和旧版回读仍不等于完整的视觉、电气、DRC 或制造验收，也不代表
+所有操作系统均已验收。降级后的静态钻孔表失去自动更新及图形符号，制造前必须复核。

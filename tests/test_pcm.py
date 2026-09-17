@@ -239,7 +239,7 @@ print(len(registered))
         history_path.write_bytes(json_bytes(history))
         path = self.publish(timestamp=1788652801)
         releases = json.loads(history_path.read_bytes())['packages'][0]['versions']
-        self.assertEqual(['0.4.7','0.4.4'], [item['version'] for item in releases])
+        self.assertEqual(['0.4.8','0.4.4'], [item['version'] for item in releases])
         releases[0]['download_sha256'] = '0'*64
         history = json.loads(history_path.read_bytes())
         history['packages'][0]['versions'] = releases

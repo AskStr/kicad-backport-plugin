@@ -4,8 +4,11 @@ Copyright (C) 问星/askstar
 
 Version 0.4.9
 
-Release 0.4.9 fixes KiCad 6/7 hierarchy, annotation, and power-net roundtrips.
-The expanded KiCad 6–10 schematic matrix passes all 25 paths, and one PCM ZIP
+Release 0.4.9 fixes [Issue #4](https://github.com/AskStr/kicad-backport-plugin/issues/4),
+where KiCad 10→9 backports lost schematic reference designators. Special thanks to
+[**romain145**](https://github.com/romain145) for the report and feedback. It also fixes
+KiCad 6/7 hierarchy, annotation, and power-net roundtrips. The expanded KiCad 6–10
+schematic matrix passes all 25 paths, and one PCM ZIP
 automatically selects ActionPlugin for KiCad 6–10 or API/IPC for 10.99. See the
 [release notes and validation boundaries](docs/release-0.4.9.md).
 

@@ -1,9 +1,25 @@
-# 0.4.9 发布说明：KiCad 6/7 往返与 KiCad 6–10.99 通用启动
+# 0.4.9 发布说明：修复 Issue #4 与 KiCad 6–10.99 通用启动
 
-发布日期：2026-09-18。包状态为 **stable**。本版本修复预发布验证中记录的四条 V6/V7 失败，
-并为一个 PCM 安装包加入 KiCad 6–10.99 自动启动分流：KiCad 6–10 使用传统 ActionPlugin，
-KiCad 10.99 使用 API/IPC。正式发布版本号为 **0.4.9**，沿用原 PCM 订阅地址。
+发布日期：2026-09-18。包状态为 **stable**。本版本重点修复
+[Issue #4](https://github.com/AskStr/kicad-backport-plugin/issues/4) 报告的错误：
+将 KiCad 10 工程降级到 KiCad 9 后，原理图位号会丢失。修复同时强化了旧格式的实例路径、
+层级位号和页码保留逻辑，并解决预发布验证中记录的四条 V6/V7 往返失败。
+
+特别感谢 [**romain145**](https://github.com/romain145) 报告问题并提供反馈。
+
+本版本还为一个 PCM 安装包加入 KiCad 6–10.99 自动启动分流：KiCad 6–10 使用传统
+ActionPlugin，KiCad 10.99 使用 API/IPC。正式发布版本号为 **0.4.9**，沿用原 PCM 订阅地址。
 如果安装过未发布的同版本测试包，请先卸载测试副本，再从正式仓库安装。
+
+## Issue #4：KiCad 10 降级到 KiCad 9 后位号丢失
+
+Issue #4 的直接表现是转换成功，但降级后的原理图中所有 reference designators（如 `R1`、
+`U1`）消失。根因是处理较新原理图实例数据时，没有在降级清理前后完整保留工程名、根 UUID、
+层级路径、单元号和位号之间的关联。本版本改为从独立的源文档快照读取实例数据，并按工程和
+完整层级路径重建或保留目标格式所需的实例表。
+
+该问题已纳入自动回归与 KiCad 6–10 的 5×5 转换矩阵，覆盖 KiCad 10→9 的直接降级以及
+共用子页、嵌套子页和多单元器件场景。
 
 ## 修复方案
 
@@ -86,8 +102,11 @@ python -B -m unittest discover -s tests -v
 
 ## English summary
 
-Release 0.4.9 fixes the four V6/V7 failures recorded during pre-release
-validation. The same ZIP selects the startup path by host version:
+Release 0.4.9 fixes [Issue #4](https://github.com/AskStr/kicad-backport-plugin/issues/4),
+where reference designators were lost when backporting a KiCad 10 project to KiCad 9.
+Special thanks to [**romain145**](https://github.com/romain145) for reporting the problem
+and providing feedback. The release also fixes the four V6/V7 failures recorded during
+pre-release validation. The same ZIP selects the startup path by host version:
 KiCad 6–10 register the traditional ActionPlugin even when the API server is enabled,
 while KiCad 10.99 remains API/IPC-only.
 Users of an unpublished 0.4.9 test build must uninstall it before installing the stable release. V6 uses complete legacy

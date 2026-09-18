@@ -239,6 +239,11 @@ in `E:\WORKS\MY\kicadProject\kicad-backport-cplus`.
 
 ## Issue #4: schematic annotations and power nets
 
+Issue [#4](https://github.com/AskStr/kicad-backport-plugin/issues/4), reported by
+[**romain145**](https://github.com/romain145), identified that KiCad 10→9 backports
+could lose all schematic reference designators. Thanks to romain145 for the report
+and feedback that led to this regression coverage.
+
 The regression fixture in `tests/test_schematic_instances.py` is an independent
 synthetic KiCad 10 project, not the reporter's original design. It includes two
 instances of one subsheet, a nested shared subsheet, and two global power rails

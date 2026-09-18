@@ -964,7 +964,7 @@ def main():
             '(property "Reference" "U" (at 5 5 0)) '
             '(property "Value" "Demo_Symbol" (at 5 7 0)) '
             '(instances (project "demo" '
-            '(path "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/12345678-1234-1234-1234-123456789abc/22222222-2222-2222-2222-222222222222" '
+            '(path "/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/12345678-1234-1234-1234-123456789abc" '
             '(reference "U2") (unit 1))))) '
             '(sheet_instances (path "/" (page "1"))) '
             '(symbol_instances))\n',
@@ -1066,7 +1066,8 @@ def main():
         assert '"Demo_Alias"' in legacy_project_sym
         assert '"ki_description"' in legacy_project_sym and '"Demo description"' in legacy_project_sym
         legacy_project_sch = (legacy_project_v7 / "demo.kicad_sch").read_text(encoding="utf-8")
-        assert "(symbol_instances" in legacy_project_sch
+        assert "(symbol_instances" not in legacy_project_sch
+        assert "(instances" in legacy_project_sch
         assert '"demo:Demo_Symbol"' in legacy_project_sch
         assert "(lib_symbols" in legacy_project_sch
         assert '"U2"' in legacy_project_sch
@@ -1091,8 +1092,8 @@ def main():
         project_v7_sch = (project_v7 / "demo.kicad_sch").read_text(encoding="utf-8")
         assert "(lib_symbols" in project_v7_sch
         assert '"demo:Demo_Symbol"' in project_v7_sch
-        assert "/12345678-1234-1234-1234-123456789abc/22222222-2222-2222-2222-222222222222" in project_v7_sch
-        assert '"U2"' in project_v7_sch
+        assert "(symbol_instances" not in project_v7_sch
+        assert "(instances" in project_v7_sch
         assert "/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/12345678-1234-1234-1234-123456789abc" not in project_v7_sch
         project_v7_child = (project_v7 / "child.kicad_sch").read_text(encoding="utf-8")
         project_v7_child_compact = " ".join(project_v7_child.split())
@@ -1107,8 +1108,9 @@ def main():
         project_v9_child = (project_v9 / "child.kicad_sch").read_text(encoding="utf-8")
         project_v9_child_compact = " ".join(project_v9_child.split())
         assert "(symbol_instances" not in project_v9_sch
-        assert "/12345678-1234-1234-1234-123456789abc/22222222-2222-2222-2222-222222222222" not in project_v9_child
-        assert "(instances" not in project_v9_child
+        # Modern annotations belong to the root/sheet path, not root tables.
+        assert '(path "/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/12345678-1234-1234-1234-123456789abc" (reference "U2") (unit 1))' in project_v9_child_compact
+        assert "(instances" in project_v9_child
         assert "(sheet_instances" not in project_v9_child
         assert "(symbol_instances" not in project_v9_child
         assert '(uuid "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")' in project_v9_child

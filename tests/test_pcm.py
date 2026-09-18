@@ -175,16 +175,21 @@ print(len(registered))
         self.assertEqual(0, result.returncode, result.stderr)
         return int(result.stdout.strip())
 
-    def test_swig_ipc_selection_matrix(self):
+    def test_action_plugin_selection_matrix(self):
         for version in ('6.0', '7.0', '8.0', '9.0', '10.0', '10.99'):
             for api in (False, True):
                 with self.subTest(version=version, api=api):
-                    self.assertEqual(0 if api and int(version.split('.')[0]) >= 9 else 1, self.registration(version, api))
+                    self.assertEqual(0 if version == '10.99' else 1, self.registration(version, api))
 
-    def test_settings_manager_precedes_environment(self):
-        self.assertEqual(0, self.registration('10.0', True, settings_manager=True))
+    def test_kicad_10_keeps_legacy_registration_when_api_is_enabled(self):
+        self.assertEqual(1, self.registration('10.0', True, settings_manager=True))
 
-    def test_bad_settings_fall_back_without_importing_gui(self):
+    def test_kicad_10_99_never_falls_back_to_legacy_registration(self):
+        for api in (False, True):
+            with self.subTest(api=api):
+                self.assertEqual(0, self.registration('10.99', api, settings_manager=True))
+
+    def test_kicad_10_legacy_registration_ignores_api_settings(self):
         for text in ('not-json', 'null', '[]', '{"api":null}', '{"api":{"enable_server":"true"}}'):
             with self.subTest(text=text):
                 self.assertEqual(1, self.registration('10.0', False, text))
@@ -195,27 +200,19 @@ print(len(registered))
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
         self.assertEqual(0, result.returncode, result.stderr)
 
-    def test_platform_config_and_active_version_isolation(self):
+    def test_host_version_selects_the_startup_runtime(self):
         spec = importlib.util.spec_from_file_location('pcm_entrypoint_test', ROOT/'pcm/entrypoint.py')
         module = importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules, {'pcbnew': None}):
             spec.loader.exec_module(module)
-        host = types.SimpleNamespace(GetBuildVersion=lambda: '10.0.4')
-        for platform in ('win32', 'darwin', 'linux'):
-            with self.subTest(platform=platform), patch.object(module.sys, 'platform', platform), patch.dict(os.environ, {}, clear=True), patch.object(module.os.path, 'expanduser', side_effect=lambda value: str(self.directory) if value == '~' else value):
-                if platform == 'win32':
-                    base = self.directory/'AppData/Roaming/kicad'
-                elif platform == 'darwin':
-                    base = self.directory/'Library/Preferences/kicad'
-                else:
-                    base = self.directory/'.config/kicad'
-                for version, api in (('10.0', False), ('10.99', True)):
-                    config = base/version
-                    config.mkdir(parents=True, exist_ok=True)
-                    (config/'kicad_common.json').write_text(json.dumps({'api': {'enable_server': api}}))
-                self.assertFalse(module._use_ipc(host))
-                (base/'10.0/kicad_common.json').write_text('{"api":{"enable_server":true}}')
-                self.assertTrue(module._use_ipc(host))
+        cases = (
+            ('6.0.11', False), ('9.0.7', False), ('10.0.4', False),
+            ('10.99.0', True), ('11.0.0', True), ('unknown', False),
+        )
+        for version, expected in cases:
+            with self.subTest(version=version):
+                host = types.SimpleNamespace(GetBuildVersion=lambda version=version: version)
+                self.assertEqual(expected, module._use_ipc(host))
 
     def test_repository_hashes_and_noop(self):
         path = self.publish(timestamp=1788652800)
@@ -239,7 +236,8 @@ print(len(registered))
         history_path.write_bytes(json_bytes(history))
         path = self.publish(timestamp=1788652801)
         releases = json.loads(history_path.read_bytes())['packages'][0]['versions']
-        self.assertEqual(['0.4.8','0.4.4'], [item['version'] for item in releases])
+        self.assertEqual([self.metadata['versions'][0]['version'], '0.4.4'],
+                         [item['version'] for item in releases])
         releases[0]['download_sha256'] = '0'*64
         history = json.loads(history_path.read_bytes())
         history['packages'][0]['versions'] = releases

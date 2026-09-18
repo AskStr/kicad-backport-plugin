@@ -2,7 +2,12 @@
 
 Copyright (C) 问星/askstar
 
-Version 0.4.8
+Version 0.4.9
+
+Release 0.4.9 fixes KiCad 6/7 hierarchy, annotation, and power-net roundtrips.
+The expanded KiCad 6–10 schematic matrix passes all 25 paths, and one PCM ZIP
+automatically selects ActionPlugin for KiCad 6–10 or API/IPC for 10.99. See the
+[release notes and validation boundaries](docs/release-0.4.9.md).
 
 Release 0.4.8 adds verified KiCad 10.99 board/footprint format `20260901`
 support, including drill charts/maps, safe static-table fallback, KiCad 9 table
@@ -45,8 +50,8 @@ requirements and do not need to be installed into KiCad's Python.
   KiCad S-expression or JSON project files for newer targets.
 - Preserves project-local symbol libraries and normalizes library tables for
   old targets.
-- Rebuilds KiCad 6+ schematic hierarchy and symbol instance data for modern
-  project outputs when needed.
+- Rebuilds KiCad 6 hierarchy tables when needed; preserves existing KiCad
+  7+ per-project/per-sheet symbol annotations and sheet page paths.
 - Writes V6/V7/V8 project-local `.kicad_prl` files with compatible visible
   items and layers for board outputs.
 - Extracts embedded PCB/footprint 3D model resources to project-local `3D/`
@@ -63,6 +68,19 @@ requirements and do not need to be installed into KiCad's Python.
 Some modern KiCad features are inherently lossy when converted to much older
 formats. The converter removes, rewrites, or approximates unsupported constructs
 and reports warnings for those changes.
+
+### Schematic annotations and power nets (issue #4)
+
+Modern project conversions retain the instance paths used for reference
+designators, including reused and nested subsheets. Power-symbol downgrade
+keeps the legacy `(power)` marker instead of removing power identity.
+Local power scope cannot be represented by older targets: promotion to
+global produces a connectivity warning in the conversion report.
+
+If a previous conversion lost annotations or merged power nets, reconvert
+from the **original annotated project**, not the damaged output. Review
+the conversion report and check ERC/netlists before using the result.
+See [regression coverage and validation](docs/python-port-status.md#issue-4-schematic-annotations-and-power-nets).
 
 ## Supported Targets
 
@@ -147,8 +165,9 @@ https://github.com/AskStr/kicad-backport-plugin/releases/latest/download/reposit
 ```
 
 For later versions, use **Refresh → Update → Apply Changes**, then restart KiCad.
-Existing subscribers need no changes. KiCad 6–10.99 share the same feed; API-enabled
-KiCad 9+ needs configured Python with Tk/wx, and KiCad 10.99 requires the API.
+Existing subscribers need no changes. One PCM ZIP automatically selects the startup path:
+KiCad 6–10 use the traditional embedded `pcbnew.ActionPlugin`, even when the API is enabled;
+KiCad 10.99 uses the API/IPC entrypoint and a configured Python with Tk/wx.
 See the [PCM guide](docs/pcm-installation.md) for prerequisites and the automated release workflow.
 The plugin is not yet in the default official repository. Installing a local PCM ZIP
 alone does not subscribe to updates.

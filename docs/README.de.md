@@ -5,7 +5,11 @@
 
 Copyright (C) askstar
 
-Version 0.4.8
+Version 0.4.9
+
+Version 0.4.9 behebt Hierarchie-, Referenz- und Stromnetz-Roundtrips fuer
+KiCad 6/7. Ein PCM-ZIP waehlt automatisch ActionPlugin fuer KiCad 6–10
+oder API/IPC fuer 10.99. Details: [Versionshinweise](release-0.4.9.md).
 
 KiCad Backport erstellt eine kompatible Kopie eines KiCad-Projekts oder einer
 KiCad-Datei fuer eine aeltere KiCad-Zielversion. Es ist fuer praktische

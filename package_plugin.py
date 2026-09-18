@@ -124,10 +124,10 @@ def build_archive(source_root=ROOT, output_path=None, status='stable'):
         'author': {'name': 'askstar', 'contact': {'web': 'https://github.com/AskStr'}},
         'description': manifest['description'],
         'description_full': 'Create compatibility copies of KiCad files and projects. '
-                            'One PCM package supports KiCad 6 through 10.99. '
-                            'KiCad 6–8 and API-disabled 9–10 use pcbnew/wxPython. '
-                            'API-enabled KiCad 9+ uses the Python action; KiCad 10.99 requires the API. '
-                            'Python 3.8 or later is required; external Python must provide tkinter/Tcl/Tk or wxPython, venv and pip. '
+                            'One PCM package automatically selects the supported startup path for KiCad 6 through 10.99. '
+                            'KiCad 6–10 use the embedded pcbnew/wxPython ActionPlugin even when the API is enabled. '
+                            'KiCad 10.99 uses the API/IPC entrypoint and an external Python with tkinter/Tcl/Tk or wxPython, venv and pip. '
+                            'Python 3.8 or later is required. '
                             'No third-party pip dependencies are required by the converter.',
         'resources': {'homepage': 'https://github.com/AskStr/kicad-backport-plugin',
                       'issues': 'https://github.com/AskStr/kicad-backport-plugin/issues'},

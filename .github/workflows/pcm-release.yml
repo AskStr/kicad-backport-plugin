@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag, for example V0.4.8
+        description: Existing release tag, for example V0.4.9
         required: true
         type: string
 
@@ -80,7 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$RELEASE_EXISTS" != true ]]; then
-            gh release create "$TAG" --draft --verify-tag --title "KiCad Backport $TAG" --notes 'KiCad 6–10.99 PCM release. Python 3.8+. Install and update through PCM; the existing repository subscription URL is unchanged.'
+            gh release create "$TAG" --draft --verify-tag --title "KiCad Backport $TAG" --generate-notes --notes 'Unified KiCad 6–10.99 PCM release. The package automatically selects ActionPlugin for KiCad 6–10 and API/IPC for 10.99. Python 3.8+. The existing repository subscription URL is unchanged.'
           fi
           python - <<'PY'
           import hashlib, json, os, subprocess

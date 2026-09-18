@@ -6,10 +6,13 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import legacy.kicad_backport_action as action  # noqa: E402
-
-
 def main():
+    # The real KiCad host already owns a wx app. Registration without one can
+    # block in native UI initialization when this smoke runs standalone.
+    import wx
+    app = wx.App(False)
+    import legacy.kicad_backport_action as action
+
     launcher = os.path.join(action.plugin_root(), 'plugin', 'plugin.py')
     if not os.path.exists(launcher):
         raise RuntimeError('plugin/plugin.py was not found')

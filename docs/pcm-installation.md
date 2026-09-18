@@ -17,16 +17,25 @@ Round Tracks 已被官方收录，其用户省去了这一步；不能仅通过�
 “从文件安装”只安装 ZIP，不等于订阅仓库。旧的本地安装若无法关联，请先备份，
 在 PCM 卸载后从仓库重新安装。不要同时保留会重复注册的手动安装副本。
 
+## 0.4.9 正式发布
+
+0.4.9 已作为稳定版本发布到同一 PCM 订阅源。它修复 V6/V7 位号及电源网络往返问题，
+KiCad 6–10 的 25 条矩阵路径全部通过；同一个安装包会为 KiCad 6–10 自动注册传统
+ActionPlugin，并为 10.99 使用 API/IPC。V6 格式由 V7 CLI 读取，仍不替代 KiCad 6
+编辑器的人工保存/重开验收。详见[发布说明、验证范围与人工复核步骤](release-0.4.9.md)。
+
+如果安装过未发布的同版本 0.4.9 测试包，PCM 不会提示同版本更新；请先卸载测试副本，
+再从正式仓库安装 0.4.9。
+
 ## 各 KiCad 版本的运行前提
 
 | KiCad | 运行入口 | PCM 检查更新 |
 |---|---|---|
-| 6 / 7 / 8 | 内置 Python、pcbnew、wxPython ActionPlugin | 同一订阅地址和版本历史 |
-| 9 / 10，API 关闭 | 保留上述旧入口 | 同上 |
-| 9 / 10，API 开启 | Python API 操作，不重复注册旧入口 | 同上 |
-| 10.99 | 必须启用 KiCad API，配置可用 Python | 同上 |
+| 6 / 7 / 8 / 9 / 10 | 单包引导器自动注册内置 Python、pcbnew、wxPython ActionPlugin；不受 API 开关影响 | 同一订阅地址和版本历史 |
+| 10.99 | 单包引导器不注册旧入口；由 `plugin.json` 使用 KiCad API/IPC 和配置的 Python | 同上 |
 
-插件最低 Python **3.8**；外部 Python 需提供 Tk 或 wxPython，API 环境还需 venv/pip。
+插件最低 Python **3.8**。KiCad 6–10 默认使用宿主内置 Python；10.99 的外部 Python
+需提供 Tk 或 wxPython，API 环境还需 venv/pip。
 转换核心不新增第三方运行依赖。PCM 的列表、图标、兼容性筛选和更新由 KiCad 管理，
 不会新增插件内后台更新器，也不会自行改写用户的 PCM 配置或安装数据库。
 

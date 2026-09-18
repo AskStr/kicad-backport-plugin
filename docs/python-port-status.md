@@ -235,3 +235,71 @@ in `E:\WORKS\MY\kicadProject\kicad-backport-cplus`.
   exporting the generated copy in the target KiCad version. The automated gates
   now cover synthetic conversion stress cases, KiCad 5.0 Python entry loading,
   KiCad 5 board loading, real fixture PCB loading, and KiCad 7 schematic export.
+
+
+## Issue #4: schematic annotations and power nets
+
+The regression fixture in `tests/test_schematic_instances.py` is an independent
+synthetic KiCad 10 project, not the reporter's original design. It includes two
+instances of one subsheet, a nested shared subsheet, and two global power rails
+with the same `lib_id` and hidden generic power-input pin, but different Values
+(`+5V` and `+3V3`). The pre-fix core merges these into `GENERIC` in a native
+KiCad 9 netlist; the corrected output keeps the two rails separate.
+
+- KiCad 7/8/9/10 project conversion preserves existing local symbol and sheet
+  `instances` blocks, including all project names, paths, references, units and
+  page numbers. Missing paths are synthesized from source context; KiCad 6 uses
+  the complete legacy root-table path. Reused sheets are not treated as new roots.
+- Both standalone symbol libraries and embedded schematic libraries retain
+  `(power)`. Only unsupported `global`/`local` scope arguments are removed for
+  targets before format `20250227`. Local-to-global promotion emits a specific
+  connectivity warning; it is not an electrically lossless transformation.
+- Native CLI checks compare component reference/value/footprint mappings and
+  complete named-net pin sets, rather than just checking that files open.
+  A separate single-sheet test isolates the power-net regression from hierarchy
+  reconstruction. Tests also check that conversion leaves source files unchanged.
+
+Run the regression tests without native KiCad (native checks are skipped):
+
+```sh
+python -B -m unittest discover -s tests -p test_schematic_instances.py -v
+```
+
+To enable native netlist checks, set `KICAD10_CLI` and `KICAD9_CLI` to the
+respective `kicad-cli` executable paths before running the same command.
+Set `KICAD8_CLI` as well to include the KiCad 8 target. These are test-only
+variables, not plugin runtime requirements. Verified locally with KiCad 8.0.9,
+9.0.7 and 10.0.4 on September 18, 2026. This establishes parity for the fixture,
+not a guarantee for arbitrary designs or unsupported local power scopes.
+
+Previously damaged outputs must be regenerated from the original annotated
+project. Re-annotation alone cannot restore missing per-instance information
+or verify that power-net connectivity is correct.
+
+
+## 0.4.9: KiCad 6/7 annotation and power-network roundtrips
+
+The four failures documented during 0.4.9 pre-release validation are fixed
+in the published 0.4.9 release. Source annotations are read independently of normalized
+output: root UUIDs survive, exact project/sheet paths select references/units,
+and V6 root tables cover all repeated/nested sheets. V7 already supports local
+project instances; it no longer follows the V6 root-table rewrite. Multi-unit
+references are never arbitrarily reannotated. Only copied project files may be
+written, and parsed shared files are reused rather than overwritten per path.
+
+KiCad 7 `SCH_PIN::GetDefaultNetName()` uses the library pin name; KiCad 8 uses
+the placed power symbol Value. On downgrade from V8+, each distinct Value gets
+a deterministic embedded library variant with compatible power-input pin names.
+Original definitions, ordinary devices' hidden power pins, and other voltage
+rails are not modified. Variant names handle collisions and repeated conversions
+do not accumulate variants. Pin visibility remains valid in the V6 grammar.
+Do not blindly replace these compatibility variants from original libraries.
+
+Validation includes a full 5-by-5 V6–V10 native-netlist matrix and the genuine
+KiCad 6 `complex_hierarchy` demo upgraded to 7/10. For the real demo, comparisons
+cover components, all connected-pin sets, and explicit net names; auto-generated
+net names may legitimately differ across native versions. V6 files are read by
+V7 CLI because V6 has no equivalent CLI export; native V6 GUI save/reopen remains
+a manual check. Local power scope and unresolved text-variable warnings still
+apply. This is fixture-based validation, not a guarantee for arbitrary designs.
+See `release-0.4.9.md` for release notes, manual checks, and replay commands.

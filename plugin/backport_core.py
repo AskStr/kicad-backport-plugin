@@ -12,7 +12,7 @@ import uuid
 from bisect import bisect_right
 from pathlib import Path
 from typing import Callable, Iterable, Optional
-VERSION = '0.4.8'
+VERSION = '0.4.9'
 ESCAPES = {'n': '\n', 't': '\t', '"': '"', '\\': '\\'}
 
 class Node:
@@ -1308,6 +1308,90 @@ def remove_children_from_parents(root, parents, children):
             node.children = [c for c in node.children if c.atom is not None or c.head() not in children]
             removed += before - len(node.children)
     return removed
+
+def downgrade_power_class_flags(root, warnings):
+    """Keep the legacy power marker; only its scope is new in 20250227."""
+    changed = 0
+    local_count = 0
+    for node in _walk(root):
+        if node.head() != 'symbol':
+            continue
+        power = node.child_list('power')
+        if power is None or len(power.children) <= 1:
+            continue
+        local_count += power.atom_at(1) == 'local'
+        power.children = power.children[:1]
+        changed += 1
+    if local_count:
+        warnings.append(
+            'promoted {} local power symbol(s) to global; target lacks local power scope, '
+            'so electrical connectivity may change'.format(local_count)
+        )
+    return changed
+
+def downgrade_power_net_names(root, warnings):
+    """KiCad <=7 names power nets by library pins; >=8 uses placed Value."""
+    libraries = root.child_list('lib_symbols') if root.head() == 'kicad_sch' else root
+    if libraries is None:
+        return 0
+    definitions = {node.atom_at(1): node for node in libraries.children if node.head() == 'symbol'}
+    changed = 0
+
+    def power_pins(definition):
+        if definition.child_list('power') is None:
+            return []
+        return [node for node in _walk(definition)
+                if node.head() == 'pin' and node.atom_at(1) == 'power_in' and node.child_list('name')]
+
+    def rename_pins(definition, value):
+        for pin in power_pins(definition):
+            pin.child_list('name').set_atom_at(1, value, True)
+
+    if root.head() == 'kicad_symbol_lib':
+        for definition in definitions.values():
+            value = _property_value(definition, 'Value')
+            pins = power_pins(definition)
+            if value and any(pin.child_list('name').atom_at(1) != value for pin in pins):
+                rename_pins(definition, value)
+                changed += 1
+        return changed
+
+    variants = {}
+    for symbol in root.children:
+        if symbol.head() != 'symbol' or symbol.child_list('lib_id') is None:
+            continue
+        lib_id = symbol.child_list('lib_id').atom_at(1)
+        definition = definitions.get(lib_id)
+        if definition is None:
+            continue
+        pins = power_pins(definition)
+        value = _property_value(symbol, 'Value')
+        if not pins or not value or all(pin.child_list('name').atom_at(1) == value for pin in pins):
+            continue
+        if '${' in value:
+            warnings.append('power net Value contains unresolved text variables; verify legacy net names: ' + value)
+        key = (lib_id, value)
+        if key not in variants:
+            # Never edit a shared definition in place: one lib_id can power
+            # several different voltage rails. Stable IDs also survive roundtrips.
+            suffix = '__backport_' + hashlib.sha256(value.encode('utf-8')).hexdigest()[:12]
+            candidate = lib_id + suffix
+            serial = 1
+            while candidate in definitions:
+                candidate = lib_id + suffix + '_' + str(serial)
+                serial += 1
+            clone = _clone_node(definition)
+            clone.set_atom_at(1, candidate, True)
+            _rename_nested_symbol_definitions(clone, lib_id.rsplit(':', 1)[-1], candidate.rsplit(':', 1)[-1])
+            _set_symbol_value_property(clone, value)
+            rename_pins(clone, value)
+            libraries.children.append(clone)
+            definitions[candidate] = clone
+            variants[key] = candidate
+            changed += 1
+        symbol.child_list('lib_id').set_atom_at(1, variants[key], True)
+    return changed
+
 
 def remove_children_or_atoms_from_parents(root, parents, children):
     removed = 0
@@ -3361,7 +3445,6 @@ def apply_downgrade_rules(doc, target):
         if target < 20241004:
             _warn_if_changed(warnings, downgrade_bool_lists_to_atoms(root, {'hide'}), 'downgraded symbol library boolean hide fields')
             _warn_if_changed(warnings, flatten_child_lists_to_atoms_in_parents(root, {'pin_names', 'pin_numbers'}, {'hide'}), 'downgraded symbol pin visibility fields')
-        _apply_when(warnings, target <= 20211014, lambda: remove_children_or_atoms_from_parents(root, {'pin'}, {'hide'}), 'removed KiCad 6-incompatible symbol pin hide fields')
         _apply_when(warnings, target <= 20211014, lambda: downgrade_kicad6_schematic_fill_colors(root), 'downgraded symbol library fill colors for KiCad 6 parsers')
         if target < 20241209:
             _warn_if_changed(warnings, ensure_legacy_property_ids(root), 'added legacy symbol property ids')
@@ -3370,7 +3453,10 @@ def apply_downgrade_rules(doc, target):
             _warn_if_changed(warnings, move_property_hide_to_effects(root), 'moved symbol property hide flags to effects')
         _queue_child_removal(child_removals, target < 20251024, {'symbol'}, {'in_pos_files'}, 'removed symbol library position file flags')
         _queue_child_removal(child_removals, target < 20250324, {'symbol'}, {'duplicate_pin_numbers_are_jumpers'}, 'removed symbol library jumper pin-number flags')
-        _queue_child_removal(child_removals, target < 20250227, {'symbol'}, {'power'}, 'removed symbol library power class flags')
+        _apply_when(warnings, target < 20250227, lambda: downgrade_power_class_flags(root, warnings), 'downgraded symbol library power scope to the legacy (power) marker')
+        _apply_when(warnings, source >= 20231120 and target < 20231120,
+                    lambda: downgrade_power_net_names(root, warnings),
+                    'specialized legacy power pin names to preserve Value-based networks')
         _queue_child_removal(child_removals, target < 20251024, {'property'}, {'show_name', 'do_not_autoplace'}, 'removed symbol property formatting fields')
         apply_child_removal_rules(root, warnings, child_removals)
     elif doc.kind == 'schematic':
@@ -3395,11 +3481,13 @@ def apply_downgrade_rules(doc, target):
         _apply_when(warnings, target < 20220124, lambda: rename_child_head_in_parents(root, {'kicad_sch'}, 'directive_label', 'netclass_flag'), 'renamed schematic directive labels to legacy netclass flags')
         _queue_child_removal(child_removals, target < 20251024, {'symbol'}, {'in_pos_files'}, 'removed schematic symbol position file flags')
         _queue_child_removal(child_removals, target < 20250324, {'symbol'}, {'duplicate_pin_numbers_are_jumpers'}, 'removed schematic library symbol jumper pin-number flags')
-        _queue_child_removal(child_removals, target < 20250227, {'symbol'}, {'power'}, 'removed schematic library symbol power class flags')
+        _apply_when(warnings, target < 20250227, lambda: downgrade_power_class_flags(root, warnings), 'downgraded schematic library symbol power scope to the legacy (power) marker')
+        _apply_when(warnings, source >= 20231120 and target < 20231120,
+                    lambda: downgrade_power_net_names(root, warnings),
+                    'specialized legacy power pin names to preserve Value-based networks')
         if target < 20241004:
             _warn_if_changed(warnings, downgrade_bool_lists_to_atoms(root, {'hide'}), 'downgraded schematic boolean hide fields')
             _warn_if_changed(warnings, flatten_child_lists_to_atoms_in_parents(root, {'pin_names', 'pin_numbers'}, {'hide'}), 'downgraded schematic symbol pin visibility fields')
-        _apply_when(warnings, target <= 20211123, lambda: remove_children_or_atoms_from_parents(root, {'pin'}, {'hide'}), 'removed KiCad 6-incompatible schematic library pin hide fields')
         _apply_when(warnings, target <= 20211123, lambda: remove_children_or_atoms_from_parents(root, {'pin'}, {'alternate'}), 'removed schematic pin alternate-function fields')
         _apply_when(warnings, target < 20240108, lambda: downgrade_font_style_lists_to_atoms(root), 'downgraded schematic font bold/italic bool fields')
         _queue_child_removal(child_removals, target <= 20250114, {'font'}, {'face'}, 'removed schematic font face fields')
@@ -3414,7 +3502,6 @@ def apply_downgrade_rules(doc, target):
         if target < 20241209:
             _warn_if_changed(warnings, ensure_legacy_property_ids(root), 'added legacy schematic property ids')
             _warn_if_changed(warnings, move_property_hide_to_effects(root), 'moved schematic property hide flags to effects')
-        _apply_when(warnings, target <= 20230121, lambda: remove_direct_children_by_head(root, 'uuid'), 'removed schematic root UUID fields')
         _queue_child_removal(child_removals, target < 20231120, {'symbol', 'sheet'}, {'fields_autoplaced'}, 'removed schematic symbol/sheet fields_autoplaced fields')
         _queue_child_removal(child_removals, target < 20251028, {'property'}, {'show_name', 'do_not_autoplace'}, 'removed schematic property formatting fields')
         _apply_when(warnings, target < 20260306, lambda: remove_direct_children_by_head(root, 'group'), 'removed schematic group nodes')
@@ -4097,19 +4184,40 @@ def _append_legacy_instance_uuid(sheet_path, uuid):
 def _sheet_instance_node(path, page):
     return sexpr_list(atom('path'), atom(path, True), sexpr_list(atom('page'), atom(page or '1', True)))
 
-def _sync_sheet_local_instances(sheet, project_name, path, page):
-    new_instances = sexpr_list(
-        atom('instances'),
-        sexpr_list(atom('project'), atom(project_name, True), _sheet_instance_node(path, page)),
-    )
-    old_instances = sheet.child_list('instances')
-    old_text = format_sexpr(old_instances).strip() if old_instances else ''
-    new_text = format_sexpr(new_instances).strip()
-    if old_text == new_text:
+def _merge_local_instance(item, project_name, instance):
+    """Add one context without replacing other projects or reused-sheet paths."""
+    instances = item.child_list('instances')
+    if instances is None:
+        instances = sexpr_list(atom('instances'))
+        item.children.append(instances)
+    project = next((node for node in instances.children
+                    if node.head() == 'project' and node.atom_at(1) == project_name), None)
+    if project is None:
+        project = sexpr_list(atom('project'), atom(project_name, True))
+        instances.children.append(project)
+    if any(node.head() == 'path' and node.atom_at(1) == instance.atom_at(1)
+           for node in project.children):
         return False
-    sheet.children = [child for child in sheet.children if child.atom is not None or child.head() != 'instances']
-    sheet.children.append(new_instances)
+    project.children.append(instance)
     return True
+
+
+def _matching_project_instance(item, project_name, path):
+    instances = item.child_list('instances')
+    if instances is None:
+        return None
+    projects = [node for node in instances.children if node.head() == 'project']
+    # A renamed project may retain its old name; exact UUID paths remain valid.
+    projects.sort(key=lambda node: node.atom_at(1) != project_name)
+    for project in projects:
+        for node in project.children:
+            if node.head() == 'path' and node.atom_at(1) == path:
+                return node
+    return None
+
+
+def _sync_sheet_local_instances(sheet, project_name, path, page):
+    return _merge_local_instance(sheet, project_name, _sheet_instance_node(path, page))
 
 def _first_project_instance_path(node):
     instances = node.child_list('instances') if node else None
@@ -4122,12 +4230,6 @@ def _first_project_instance_path(node):
             if child.atom is None and child.head() == 'path':
                 return child
     return None
-
-def _instance_path_without_first_component(path):
-    parts = [part for part in (path or '').split('/') if part]
-    if len(parts) < 2:
-        return ''
-    return '/' + '/'.join(parts[1:])
 
 def _normalized_hidden_instance_reference(reference, value):
     if len(reference) < 3 or not reference.startswith('#U'):
@@ -4194,24 +4296,12 @@ def _symbol_local_instance_node(path, symbol, source_path=None):
 
 def _sync_symbol_local_instances(symbol, project_name, path, source_path=None):
     source_path = source_path or _first_project_instance_path(symbol)
-    changed = _set_symbol_reference_property(symbol, _resolved_symbol_reference(symbol, source_path))
-    if not project_name:
-        old_instances = symbol.child_list('instances')
-        if old_instances:
-            symbol.children = [child for child in symbol.children if child.atom is not None or child.head() != 'instances']
-            return True
-        return changed
-    new_instances = sexpr_list(
-        atom('instances'),
-        sexpr_list(atom('project'), atom(project_name, True), _symbol_local_instance_node(path, symbol, source_path)),
-    )
-    old_text = format_sexpr(symbol.child_list('instances')).strip() if symbol.child_list('instances') else ''
-    new_text = format_sexpr(new_instances).strip()
-    if old_text == new_text:
-        return changed
-    symbol.children = [child for child in symbol.children if child.atom is not None or child.head() != 'instances']
-    symbol.children.append(new_instances)
-    return True
+    # The property is a display fallback, not the annotation of every instance.
+    changed = False
+    if not _reference_is_annotated(_property_value(symbol, 'Reference')):
+        changed = _set_symbol_reference_property(symbol, _resolved_symbol_reference(symbol, source_path))
+    return _merge_local_instance(symbol, project_name,
+                                 _symbol_local_instance_node(path, symbol, source_path)) or changed
 
 def _existing_sheet_instance_pages(root):
     pages = {}
@@ -4241,121 +4331,73 @@ def _collect_existing_symbol_instances(root, build):
     if not symbol_instances:
         return
     for child in symbol_instances.children:
-        if child.atom is not None or child.head() != 'path':
+        if child.head() != 'path':
             continue
-        path = child.atom_at(1)
-        if path and path not in build['existing_symbols']:
-            build['existing_symbols'][path] = _clone_node(child)
-        suffix_path = _instance_path_without_first_component(path)
-        if suffix_path and suffix_path not in build['existing_symbols_by_suffix']:
-            build['existing_symbols_by_suffix'][suffix_path] = _clone_node(child)
+        path = _normalize_legacy_sheet_path(child.atom_at(1), build['root_uuid'])
+        if path not in build['existing_symbols']:
+            build['existing_symbols'][path] = child
 
 def _sheet_file_property_value(sheet):
     return _property_value(sheet, 'Sheet file') or _property_value(sheet, 'Sheetfile')
 
-def _uniquified_reference(reference, duplicate_index):
-    if duplicate_index <= 0 or not reference:
-        return reference
-    digit_start = 0
-    while digit_start < len(reference) and not reference[digit_start].isdigit():
-        digit_start += 1
-    if digit_start >= len(reference):
-        return reference + str(duplicate_index + 1)
-    digit_end = digit_start
-    while digit_end < len(reference) and reference[digit_end].isdigit():
-        digit_end += 1
-    try:
-        number = int(reference[digit_start:digit_end])
-    except ValueError:
-        return reference + str(duplicate_index + 1)
-    return reference[:digit_start] + str(number + duplicate_index * 1000) + reference[digit_end:]
-
-def _uniquify_repeated_symbol_instance_references(symbol_instances):
-    seen = {}
-    used = set()
-    for child in symbol_instances.children:
-        if child.atom is not None or child.head() != 'path':
-            continue
-        reference = child.child_list('reference')
-        if not reference:
-            continue
-        original = reference.atom_at(1)
-        duplicate_index = seen.get(original, 0)
-        seen[original] = duplicate_index + 1
-        candidate = _uniquified_reference(original, duplicate_index)
-        while candidate in used:
-            duplicate_index += 1
-            candidate = _uniquified_reference(original, duplicate_index)
-        if candidate != original:
-            reference.set_atom_at(1, candidate, True)
-        used.add(candidate)
-
-def _has_top_level_sheet(root):
-    if not root:
-        return False
-    for child in root.children:
-        if child.atom is None and child.head() == 'sheet':
-            return True
-    return False
-
-def _collect_kicad6_hierarchy_instances(path, root, symbol_prefix, local_prefix, build, is_root=False):
+def _collect_kicad6_hierarchy_instances(path, root, symbol_prefix, local_prefix, build):
     changed = False
-    _collect_existing_symbol_instances(root, build)
+    source = build['documents'][str(path.resolve())][0]
+    _collect_existing_symbol_instances(source, build)
+    originals = {(_child_atom_or_empty(node, 'uuid'), node.head()): node
+                 for node in source.children if node.head() in {'symbol', 'sheet'}}
     for child in root.children:
-        if child.atom is not None or child.head() != 'symbol' or not child.child_list('lib_id'):
+        if child.head() != 'symbol' or not child.child_list('lib_id'):
             continue
         uuid = _child_atom_or_empty(child, 'uuid') or _child_atom_or_empty(child, 'tstamp')
         if not uuid:
             continue
+        original = originals.get((uuid, 'symbol'), child)
         instance_path = _append_instance_uuid(symbol_prefix, uuid)
-        source_path = _first_project_instance_path(child)
-        existing = build['existing_symbols'].get(instance_path) or build['existing_symbols_by_suffix'].get(instance_path)
-        resolved_path = existing or source_path
-        changed = _sync_symbol_local_instances(child, build['symbol_project_name'], local_prefix or '/', resolved_path) or changed
-        build['symbol_instances'].children.append(_symbol_instance_node(instance_path, child, existing or source_path))
+        source_path = (_matching_project_instance(original, build['project_name'], local_prefix)
+                       or build['existing_symbols'].get(instance_path)
+                       or _first_project_instance_path(original))
+        if not build['rebuild_root_tables']:
+            changed = _sync_symbol_local_instances(
+                child, build['project_name'], local_prefix, source_path) or changed
+        build['symbol_instances'].children.append(_symbol_instance_node(instance_path, child, source_path))
     for child in root.children:
-        if child.atom is not None or child.head() != 'sheet':
+        if child.head() != 'sheet':
             continue
         uuid = _child_atom_or_empty(child, 'uuid') or _child_atom_or_empty(child, 'tstamp')
         if not uuid:
             continue
+        original = originals.get((uuid, 'sheet'), child)
         sheet_path = _append_instance_uuid(symbol_prefix, uuid)
-        sheet_local_path = sheet_path if build.get('local_paths_use_sheet_prefix') else (local_prefix or '/')
-        page = build['sheet_pages'].get(sheet_path) or build['existing_pages'].get(sheet_path)
-        if sheet_path not in build['added_sheet_paths']:
-            if not page:
-                page = str(build['next_page'])
-                build['next_page'] += 1
-            build['sheet_pages'][sheet_path] = page
-            build['sheet_instances'].children.append(_sheet_instance_node(sheet_path, page))
-            build['added_sheet_paths'].add(sheet_path)
-        if page:
-            changed = _sync_sheet_local_instances(child, build['project_name'], sheet_local_path, page) or changed
+        source_path = _matching_project_instance(original, build['project_name'], local_prefix)
+        page = (_child_atom_or_empty(source_path, 'page') if source_path else '')
+        page = page or build['existing_pages'].get(sheet_path)
+        if not page:
+            page = str(build['next_page'])
+            build['next_page'] += 1
+        build['sheet_instances'].children.append(_sheet_instance_node(sheet_path, page))
+        if not build['rebuild_root_tables']:
+            changed = _sync_sheet_local_instances(
+                child, build['project_name'], local_prefix, page) or changed
         sheet_file = _sheet_file_property_value(child)
         if not sheet_file:
             continue
-        child_path = path.parent / sheet_file
-        if not child_path.exists():
+        child_path = (path.parent / sheet_file).resolve()
+        key = str(child_path)
+        # Only copied project documents may be changed; external references stay untouched.
+        if key not in build['documents'] or key in build['active_files']:
             continue
-        active_key = str(child_path.resolve())
-        if active_key in build['active_files']:
-            continue
-        try:
-            child_root = parse_sexpr(child_path.read_text(encoding='utf-8-sig'))
-        except Exception:
-            continue
-        build['active_files'].add(active_key)
-        child_local_prefix = _path_join_uuid(local_prefix or '/', uuid)
-        child_changed = _collect_kicad6_hierarchy_instances(child_path, child_root, sheet_path, child_local_prefix, build, False)
-        if not build.get('rebuild_root_tables'):
-            child_changed = _trim_modern_child_instances(child_root) or child_changed
-        build['active_files'].remove(active_key)
+        child_root = build['documents'][key][1]
+        build['active_files'].add(key)
+        child_changed = _collect_kicad6_hierarchy_instances(
+            child_path, child_root, sheet_path, _path_join_uuid(local_prefix, uuid), build)
+        child_changed = _trim_modern_child_instances(child_root) or child_changed
+        build['active_files'].remove(key)
         if child_changed:
-            _write_text(child_path, format_sexpr(child_root))
+            build['changed_files'].add(key)
     return changed
 
 def _replace_root_instances(root, build):
-    _uniquify_repeated_symbol_instance_references(build['symbol_instances'])
     kept = []
     for child in root.children:
         if child.atom is None and child.head() in {'sheet_instances', 'symbol_instances'}:
@@ -4367,6 +4409,7 @@ def _replace_root_instances(root, build):
 
 def _trim_modern_root_instances(root):
     changed = False
+    root_page = _existing_sheet_instance_pages(root).get('/', '1')
     kept = []
     sheet_instances = None
     for child in root.children:
@@ -4375,12 +4418,12 @@ def _trim_modern_root_instances(root):
             continue
         if child.atom is None and child.head() == 'sheet_instances':
             if sheet_instances is None:
-                sheet_instances = sexpr_list(atom('sheet_instances'), _sheet_instance_node('/', '1'))
+                sheet_instances = sexpr_list(atom('sheet_instances'), _sheet_instance_node('/', root_page))
             changed = changed or format_sexpr(child).strip() != format_sexpr(sheet_instances).strip()
             continue
         kept.append(child)
     if sheet_instances is None:
-        sheet_instances = sexpr_list(atom('sheet_instances'), _sheet_instance_node('/', '1'))
+        sheet_instances = sexpr_list(atom('sheet_instances'), _sheet_instance_node('/', root_page))
         changed = True
     kept.append(sheet_instances)
     root.children = kept
@@ -4398,47 +4441,69 @@ def _trim_modern_child_instances(root):
         root.children = kept
     return changed
 
-def rebuild_kicad6_hierarchy_instances(root_schematic, rebuild_root_tables=True):
-    try:
-        text = root_schematic.read_text(encoding='utf-8-sig')
-        root = parse_sexpr(text)
-    except Exception:
-        return False
-    if root.head() != 'kicad_sch' or not root.child_list('sheet_instances') or not _has_top_level_sheet(root):
-        return False
-    existing_pages = _existing_sheet_instance_pages(root)
-    root_uuid = _child_atom_or_empty(root, 'uuid')
-    root_local_path = '/' + root_uuid if root_uuid else '/'
+def rebuild_kicad6_hierarchy_instances(root_schematic, rebuild_root_tables=True, documents=None):
+    if documents is None:
+        root = parse_sexpr(root_schematic.read_text(encoding='utf-8-sig'))
+        documents = {str(root_schematic.resolve()): (_clone_node(root), root)}
+    key = str(root_schematic.resolve())
+    source, root = documents[key]
+    existing_pages = _existing_sheet_instance_pages(source)
+    root_uuid = _child_atom_or_empty(source, 'uuid') or _child_atom_or_empty(root, 'uuid')
+    identity_changed = False
+    if not root_uuid:
+        # Legacy .sch upgrades already generate a UUID; handle malformed old roots deterministically.
+        root_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, root_schematic.name))
+    if root.child_list('uuid') is None:
+        root.children.append(sexpr_list(atom('uuid'), atom(root_uuid)))
+        identity_changed = True
+    root_local_path = '/' + root_uuid
     build = {
-        'sheet_instances': sexpr_list(atom('sheet_instances')),
+        'sheet_instances': sexpr_list(atom('sheet_instances'),
+                                     _sheet_instance_node('/', existing_pages.get('/', '1'))),
         'symbol_instances': sexpr_list(atom('symbol_instances')),
         'existing_pages': existing_pages,
         'existing_symbols': {},
-        'existing_symbols_by_suffix': {},
         'project_name': root_schematic.stem,
-        'symbol_project_name': root_schematic.stem if rebuild_root_tables else '',
-        'sheet_pages': {'/': '1'},
+        'root_uuid': root_uuid,
         'rebuild_root_tables': rebuild_root_tables,
-        'added_sheet_paths': set(['/']),
-        'active_files': set([str(root_schematic.resolve())]),
+        'active_files': {key},
         'next_page': _next_sheet_page(existing_pages),
+        'documents': documents,
+        'changed_files': set(),
     }
-    build['sheet_instances'].children.append(_sheet_instance_node('/', '1'))
-    changed = _collect_kicad6_hierarchy_instances(root_schematic, root, '', root_local_path, build, True)
+    changed = _collect_kicad6_hierarchy_instances(root_schematic, root, '', root_local_path, build)
+    changed = identity_changed or changed
     if rebuild_root_tables:
         _replace_root_instances(root, build)
         changed = True
     else:
         changed = _trim_modern_root_instances(root) or changed
     if changed:
-        _write_text(root_schematic, format_sexpr(root))
-    return changed
+        build['changed_files'].add(key)
+    for filename in build['changed_files']:
+        _write_text(Path(filename), format_sexpr(documents[filename][1]))
+    return bool(build['changed_files'])
+
 
 def rebuild_kicad6_project_hierarchy_instances(copied, rebuild_root_tables=True):
+    # Read source annotations independently of already normalized outputs, and
+    # reuse parsed output nodes for every occurrence of a shared file.
+    documents = {}
+    for source, output in copied:
+        if output.suffix.lower() != '.kicad_sch':
+            continue
+        root = parse_sexpr(output.read_text(encoding='utf-8-sig'))
+        original = (parse_sexpr(source.read_text(encoding='utf-8-sig'))
+                    if source.suffix.lower() == '.kicad_sch' else _clone_node(root))
+        documents[str(output.resolve())] = (original, root)
+    referenced = set()
+    for filename, (_, root) in documents.items():
+        for sheet in root.children:
+            if sheet.head() == 'sheet' and _sheet_file_property_value(sheet):
+                referenced.add(str((Path(filename).parent / _sheet_file_property_value(sheet)).resolve()))
     changed = 0
-    for _src, out in copied:
-        if out.suffix.lower() == '.kicad_sch' and rebuild_kicad6_hierarchy_instances(out, rebuild_root_tables):
-            changed += 1
+    for filename in sorted(set(documents) - referenced):
+        changed += rebuild_kicad6_hierarchy_instances(Path(filename), rebuild_root_tables, documents)
     return changed
 
 def legacy_target_version_for_kind(kind, target_major):
@@ -7221,13 +7286,13 @@ def convert(input_path, output_path, target, report_path=None):
             for table_report in table_reports:
                 stderr_lines.extend((f'warning: {table_report.path}: {warning}' for warning in table_report.warnings))
         if target_major > 5:
-            rebuild_root_tables = target_major <= 7
+            rebuild_root_tables = target_major <= 6
             rebuilt = rebuild_kicad6_project_hierarchy_instances(copied, rebuild_root_tables)
             if rebuilt:
                 hierarchy_message = (
-                    'rebuilt KiCad 6/7 schematic sheet/symbol hierarchy instances in {} file(s)'
+                    'rebuilt KiCad 6 schematic sheet/symbol hierarchy instances in {} file(s)'
                     if rebuild_root_tables
-                    else 'normalized KiCad 8+ schematic local sheet/symbol instances in {} file(s)'
+                    else 'normalized KiCad 7+ schematic local sheet/symbol instances in {} file(s)'
                 )
                 hierarchy_report = _report(
                     output_p,

@@ -1,6 +1,6 @@
 """Optional Windows native runtime/schema smoke; never touches user settings.
 
-Usage: python scripts/pcm_native_smoke.py --kicad-root D:/KiCad
+Usage: python scripts/pcm_native_smoke.py --kicad-root D:/KiCad [--archive package.zip]
 Does not automate PCM dialogs or claim an online repository installation test.
 """
 import argparse
@@ -32,10 +32,18 @@ def register(self):
     registered.append(self)
 pcbnew.ActionPlugin.register = register
 importlib.import_module(sys.argv[2])
-assert len(registered) == int(sys.argv[3]), len(registered)
+expected = int(sys.argv[3])
+assert len(registered) == expected, len(registered)
+launched = []
+if expected:
+    action_module = importlib.import_module(sys.argv[2] + '.legacy.kicad_backport_action')
+    action_module.launch_gui = lambda: launched.append(True)
+    registered[0].Run()
+    assert launched == [True], launched
 sys.path.insert(0, os.path.join(sys.argv[1], sys.argv[2], 'plugin'))
 import backport_core, plugin
-print(pcbnew.GetBuildVersion(), 'registered=' + str(len(registered)), 'version=' + backport_core.VERSION)
+print(pcbnew.GetBuildVersion(), 'registered=' + str(len(registered)),
+      'run-dispatched=' + str(len(launched)), 'version=' + backport_core.VERSION)
 '''
 
 
@@ -43,10 +51,13 @@ def main():
     from jsonschema import Draft7Validator
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kicad-root', required=True, type=Path)
+    parser.add_argument('--archive', type=Path, help='Validate this built PCM ZIP instead of rebuilding one')
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='Backport-native-') as temp:
         base = Path(temp)
-        archive_path = build_archive(output_path=base/'release.zip')
+        archive_path = args.archive.resolve() if args.archive else build_archive(output_path=base/'release.zip')
+        if not archive_path.is_file():
+            parser.error('Archive not found: ' + str(archive_path))
         with ZipFile(archive_path) as archive:
             metadata = json.loads(archive.read('metadata.json'))
             manifest = json.loads(archive.read('plugins/plugin.json'))
@@ -79,7 +90,7 @@ def main():
                 env.update(KICAD_CONFIG_HOME=str(base/'config'), KICAD_BACKPORT_LANGUAGE='en')
                 for key in ('PYTHONHOME', 'PYTHONPATH'):
                     env.pop(key, None)
-                expected = 0 if api and int(version.split('.')[0]) >= 9 else 1
+                expected = 0 if version == '10.99' else 1
                 result = subprocess.run([str(python), '-B', '-u', '-c', PROBE, str(package.parent), package.name, str(expected), str(icon)],
                                         env=env, cwd=base, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30)
                 if result.returncode:

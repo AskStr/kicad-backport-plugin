@@ -83,7 +83,7 @@ jobs:
             gh release create "$TAG" --draft --verify-tag --title "KiCad Backport $TAG" --generate-notes --notes 'Unified KiCad 6–10.99 PCM release. The package automatically selects ActionPlugin for KiCad 6–10 and API/IPC for 10.99. Python 3.8+. The existing repository subscription URL is unchanged.'
           fi
           python - <<'PY'
-          import hashlib, json, os, subprocess
+          import hashlib, json, os, subprocess, time
           from pathlib import Path
           tag, repo = os.environ['TAG'], os.environ['GITHUB_REPOSITORY']
           root = Path('dist/pcm-repository')
@@ -92,12 +92,18 @@ jobs:
           files += [root / index[key]['url'].rsplit('/', 1)[1] for key in ('packages', 'resources')]
           files += [root / 'packages.json', root / 'repository.json']  # Root pointer LAST.
           def release_for_tag():
-              pages = json.loads(subprocess.check_output(
-                  ['gh', 'api', '--paginate', '--slurp', 'repos/' + repo + '/releases?per_page=100']))
-              matches = [release for page in pages for release in page if release['tag_name'] == tag]
-              if len(matches) != 1:
-                  raise SystemExit('Expected exactly one release for ' + tag)
-              return matches[0]
+              # Draft creation is eventually consistent across GitHub API endpoints.
+              for attempt in range(10):
+                  pages = json.loads(subprocess.check_output(
+                      ['gh', 'api', '--paginate', '--slurp', 'repos/' + repo + '/releases?per_page=100']))
+                  matches = [release for page in pages for release in page if release['tag_name'] == tag]
+                  if len(matches) == 1:
+                      return matches[0]
+                  if len(matches) > 1:
+                      raise SystemExit('Multiple releases found for ' + tag)
+                  if attempt < 9:
+                      time.sleep(2)
+              raise SystemExit('Expected exactly one release for ' + tag)
 
           release = release_for_tag()
           assets = {a['name']: a for a in release['assets']}

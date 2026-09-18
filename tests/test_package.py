@@ -18,6 +18,8 @@ class PackageTests(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/pcm-release.yml').read_text(encoding='utf-8')
         self.assertIn("f.write('RELEASE_DRAFT='", workflow)
         self.assertIn("releases?per_page=100", workflow)
+        self.assertIn("for attempt in range(10)", workflow)
+        self.assertIn("time.sleep(2)", workflow)
         self.assertIn("'repos/' + repo + '/releases/' + str(release['id'])", workflow)
         self.assertNotIn("'/releases/tags/' + tag", workflow)
 
